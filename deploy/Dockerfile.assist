@@ -1,0 +1,31 @@
+# Query-Assist. One per project, same as `thetad`
+# (`docs/DECISION-assist-and-isolation.md`).
+#
+# Deployed as its own task rather than a sidecar in the `thetad` task. A sidecar
+# would share the task's network namespace, which is exactly the loopback
+# adjacency that decision is about — and would put a component that talks to a
+# third-party model inside the boundary holding the data.
+
+FROM rust:1.90-bookworm AS build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends capnproto \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+# `sdk/rust` is a workspace member, so cargo refuses to load the workspace
+# without it even though nothing here builds it. Omitting it fails at manifest
+# load, before a single crate compiles.
+COPY sdk/rust/ sdk/rust/
+
+RUN cargo build --release --locked -p theta-assist
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+USER nonroot:nonroot
+
+COPY --from=build /src/target/release/theta-assist /usr/local/bin/theta-assist
+
+EXPOSE 7800
+ENTRYPOINT ["/usr/local/bin/theta-assist"]

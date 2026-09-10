@@ -1,0 +1,109 @@
+{
+  "rows": 20000,
+  "depth": 50,
+  "host": "Windows AMD64",
+  "results": [
+    {
+      "system": "thetabase (this repo)",
+      "note": "Through the Python SDK to a live thetad over the Cap'n Proto wire, so the boundary matches the other two. The engine's own in-process numbers are in crates/theta-storage/tests/branch_cost.rs and are not comparable to anything here.",
+      "read_at_root": {
+        "n": 300,
+        "median_us": 634.3,
+        "min_us": 603.3,
+        "max_us": 1231.1
+      },
+      "read_at_depth": {
+        "n": 300,
+        "median_us": 656.8,
+        "min_us": 530.5,
+        "max_us": 1659.4
+      },
+      "fork_small_parent": {
+        "n": 20,
+        "median_us": 1485.3,
+        "min_us": 1301.9,
+        "max_us": 3211.8
+      },
+      "fork_large_parent": {
+        "n": 20,
+        "median_us": 1339.0,
+        "min_us": 1292.1,
+        "max_us": 1786.9
+      },
+      "write_after_fork": {
+        "n": 20,
+        "median_us": 1574.6,
+        "min_us": 1264.9,
+        "max_us": 13993.1
+      }
+    },
+    {
+      "system": "dolt 2.3.1",
+      "note": "Native branching: DOLT_BRANCH and DOLT_CHECKOUT, over the MySQL wire.",
+      "read_at_root": {
+        "n": 300,
+        "median_us": 781.2,
+        "min_us": 648.8,
+        "max_us": 2135.6
+      },
+      "read_at_depth": {
+        "n": 300,
+        "median_us": 777.8,
+        "min_us": 655.8,
+        "max_us": 1681.7
+      },
+      "fork_small_parent": {
+        "n": 20,
+        "median_us": 4983.2,
+        "min_us": 4645.6,
+        "max_us": 6380.0
+      },
+      "fork_large_parent": {
+        "n": 20,
+        "median_us": 5051.3,
+        "min_us": 4693.5,
+        "max_us": 6252.4
+      },
+      "write_after_fork": {
+        "n": 20,
+        "median_us": 3324.6,
+        "min_us": 3060.8,
+        "max_us": 4569.3
+      }
+    },
+    {
+      "system": "postgres:16",
+      "note": "Branching by `CREATE DATABASE ... TEMPLATE`, which is the copy-on-write baseline BranchBench uses. Postgres has no native branch, so this is the closest honest equivalent.",
+      "read_at_root": {
+        "n": 300,
+        "median_us": 539.7,
+        "min_us": 476.0,
+        "max_us": 1238.4
+      },
+      "read_at_depth": {
+        "n": 300,
+        "median_us": 517.2,
+        "min_us": 471.2,
+        "max_us": 2492.1
+      },
+      "fork_small_parent": {
+        "n": 20,
+        "median_us": 25668.2,
+        "min_us": 23637.0,
+        "max_us": 110846.8
+      },
+      "fork_large_parent": {
+        "n": 20,
+        "median_us": 27664.0,
+        "min_us": 25748.6,
+        "max_us": 65860.0
+      },
+      "write_after_fork": {
+        "n": 20,
+        "median_us": 514.4,
+        "min_us": 474.5,
+        "max_us": 1115.5
+      }
+    }
+  ]
+}

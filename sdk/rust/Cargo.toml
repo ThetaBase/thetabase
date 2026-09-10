@@ -1,0 +1,38 @@
+[package]
+name = "thetabase"
+description = "The ThetaBase Rust SDK: a typed query builder and a client, over the Scribe core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "FSL-1.1-MIT"
+repository.workspace = true
+# Inherited from the workspace, which is `false` until the IP decision in
+# `docs/DISTRIBUTION.md` is made. Two reasons stack here: a crates.io release
+# may not depend on an unpublished crate (`theta-scribe-wasm`), and a publish is
+# a public disclosure that ends patent rights outside the US.
+publish.workspace = true
+[dependencies]
+# The client half of Scribe: pooling, the read cache, token refresh. Already
+# built, already tested against a live thetad — the Rust SDK wraps it rather
+# than reimplementing a client on top of the protocol core.
+theta-scribe.workspace = true
+# The protocol core, linked rather than loaded. Every other SDK reaches this
+# same code through a WASM runtime; Rust does not need one.
+theta-scribe-wasm.workspace = true
+# The wire types, generated from `theta.capnp` by theta-proto's build script.
+# Re-exported rather than restated: a second copy is the drift `make sdk-check`
+# exists to catch in the other bindings, and Rust gets that for free.
+theta-proto.workspace = true
+theta-core.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true }
+tokio = { workspace = true }
+
+# An example rather than a binary, matching `thetad`'s conformance server: it is
+# a test harness, so it should not be in what a user builds when they add this
+# crate as a dependency.
+[[example]]
+name = "conformance"

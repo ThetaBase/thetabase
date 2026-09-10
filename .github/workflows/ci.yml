@@ -1,0 +1,171 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Build, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+
+  # Durability is written against POSIX, and the places where that is not
+  # portable are invisible on Linux. Every test that opened a store failed on
+  # Windows for months because `File::open` on a directory - the POSIX way to
+  # fsync one - is refused there, and a Linux-only CI reported green throughout.
+  #
+  # Storage and the daemon only: this exists to keep the filesystem assumptions
+  # honest, not to double the whole matrix.
+  windows-storage:
+    name: "Storage and daemon on Windows"
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p theta-storage
+      - run: cargo test -p thetad
+
+  # M8's gate turns on a real migration, so CI runs one. A Postgres service
+  # container rather than a fake: the whole point of the verification pass is
+  # detecting changes of meaning between two real type systems, and a fake
+  # would be built from the same assumptions the mapping already makes.
+  #
+  # THETA_REQUIRE_LIVE turns a skip into a failure. Without it, a job that
+  # could not reach the database would report the same green as one that
+  # migrated successfully.
+  eject-gate:
+    name: "Gate: migration correctness (M8)"
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: thetabase
+          POSTGRES_PASSWORD: thetabase
+          POSTGRES_DB: shopdb
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U thetabase -d shopdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Load the source schema
+        run: psql "$THETA_EJECT_TEST_URL" -v ON_ERROR_STOP=1 -f crates/theta-eject/tests/fixtures/shopdb.sql
+        env:
+          THETA_EJECT_TEST_URL: postgresql://thetabase:thetabase@127.0.0.1:55432/shopdb
+      - run: make eject
+      - run: make eject-live
+        env:
+          THETA_EJECT_TEST_URL: postgresql://thetabase:thetabase@127.0.0.1:55432/shopdb
+
+  # The validation gates are separate jobs so a failure names the gate that
+  # broke, not just "tests failed". Per docs/specs/08 §9, a milestone is not
+  # complete until its gate passes.
+  consistency-gate:
+    name: "Gate: consistency (M1)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p theta-core --test convergence
+      - run: cargo test -p theta-storage --test convergence_durable
+      - run: cargo test -p theta-storage --test crash_consistency
+      - run: cargo test -p theta-storage --test durability
+      - run: cargo test -p theta-storage --test durable_store
+      - run: cargo test -p theta-storage --test merge
+      - run: cargo test -p thetad --test network_partitions
+
+  adversarial-gate:
+    name: "Gate: agent-safety corpus (M5)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p theta-safety --test adversarial_corpus
+      - run: cargo test -p thetad --test safety_gate
+
+  hot-path-gate:
+    name: "Gate: zero LLM calls on the hot path (M3)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p thetad --test no_llm_on_hot_path
+
+  query-gate:
+    name: "Gate: query planner and SLA (M3)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: make query
+      # Release build: a debug build measures bounds checks, not the engine.
+      - run: make sla
+
+  identity-gate:
+    name: "Gate: identity and revocation (M4)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: make identity
+
+  wire-gate:
+    name: "Gate: wire conformance (M2)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # capnp is not needed to build — theta-proto generates its bindings
+      # in-process — but validating against the reference implementation
+      # catches schema mistakes the embedded compiler might accept.
+      - run: sudo apt-get update && sudo apt-get install -y capnproto
+      - run: make proto
+      - run: cargo test -p theta-proto
+      - run: cargo test -p thetad --test server
+      - run: cargo test -p theta-scribe
+
+  sdk:
+    name: SDK typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: sdk/typescript
+      - run: npx tsc -p tsconfig.json --noEmit
+        working-directory: sdk/typescript
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -c "import sys; sys.path.insert(0, 'src'); import thetabase"
+        working-directory: sdk/python

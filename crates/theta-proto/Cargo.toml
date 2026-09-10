@@ -1,0 +1,18 @@
+[package]
+name = "theta-proto"
+description = "ThetaBase wire protocol: Cap'n Proto schema and version negotiation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+[dependencies]
+capnp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+capnpc.workspace = true
+capnpc-embedded.workspace = true

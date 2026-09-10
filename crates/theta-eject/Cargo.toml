@@ -1,0 +1,24 @@
+[package]
+name = "theta-eject"
+description = "Migration from Postgres/Supabase into ThetaBase: reflect, map, import, verify."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "FSL-1.1-MIT"
+repository.workspace = true
+publish.workspace = true
+[dependencies]
+theta-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# Deliberately not a hot-path crate; see the module docs and
+# `crates/thetad/tests/no_llm_on_hot_path.rs` for the list that is.
+tokio-postgres = "0.7"
+
+[dev-dependencies]
+theta-storage.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

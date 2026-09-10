@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.thetabase</groupId>
+  <artifactId>thetabase</artifactId>
+  <version>0.0.1</version>
+  <packaging>jar</packaging>
+  <name>ThetaBase Java SDK</name>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- No licence chosen yet; see docs/DISTRIBUTION.md. A deploy is a public
+         disclosure, and disclosure ends patent rights outside the US. -->
+    <maven.deploy.skip>true</maven.deploy.skip>
+    <chicory.version>1.6.1</chicory.version>
+    <jackson.version>2.20.0</jackson.version>
+  </properties>
+
+  <dependencies>
+    <!-- Chicory rather than Wasmtime's JNI bindings: pure Java, no native
+         library to ship per platform, and a jar a user can drop into any JVM.
+         The Scribe core imports nothing, so none of the WASI machinery the
+         alternatives offer is needed. -->
+    <dependency>
+      <groupId>com.dylibso.chicory</groupId>
+      <artifactId>runtime</artifactId>
+      <version>${chicory.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.dylibso.chicory</groupId>
+      <artifactId>wasm</artifactId>
+      <version>${chicory.version}</version>
+    </dependency>
+    <!-- The core's boundary is JSON, so the SDK needs a JSON library. Jackson
+         because it is what a JVM shop already has, and because its
+         `ObjectNode` preserves insertion order - which the conformance runner
+         needs, since it is compared byte for byte against three other SDKs. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.4</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>

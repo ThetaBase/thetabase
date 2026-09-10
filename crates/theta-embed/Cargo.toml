@@ -1,0 +1,18 @@
+[package]
+name = "theta-embed"
+license = "FSL-1.1-MIT"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+theta-core.workspace = true
+theta-safety.workspace = true
+theta-storage.workspace = true
+thetad.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

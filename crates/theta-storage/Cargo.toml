@@ -1,0 +1,31 @@
+[package]
+name = "theta-storage"
+description = "ThetaBase storage engine: append-only log, WAL durability, branch pointers, materialized views."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "FSL-1.1-MIT"
+repository.workspace = true
+publish.workspace = true
+[dependencies]
+# Signed commits (M20). A signature primitive, not a network client — the
+# hot-path guard in `thetad/tests/no_llm_on_hot_path.rs` forbids anything that
+# could reach a model or the network, and this reaches neither.
+ed25519-dalek.workspace = true
+# XChaCha20-Poly1305 for data at rest: a 192-bit nonce makes random selection
+# safe for as many records as a database will hold, with no counter a
+# crash-and-truncate cycle could replay. See src/encryption.rs.
+chacha20poly1305 = "0.10"
+getrandom.workspace = true
+theta-core.workspace = true
+serde.workspace = true
+imbl.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+crc32fast.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

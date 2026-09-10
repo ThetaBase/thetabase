@@ -1,0 +1,276 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThetaBase — the safety gate belongs inside the database</title>
+<meta name="description" content="A branchable database for AI agents. A rule-based classifier decides which schema changes need a human, inside the engine — where a connection string cannot route around it.">
+
+<!--
+  NOT FOR PUBLICATION until the provisional is filed.
+
+  `docs/business/MARKETING-PLAN.md` §0.1: public disclosure ends patent rights
+  outside the US on the day it happens, with no grace period in most of the
+  world. This file exists so the site is ready on filing day, not so it can go
+  up before one.
+
+  Every claim here is checked against `docs/claims.toml` discipline. The
+  benchmark table publishes the rows where we lose, deliberately — see §2.1 of
+  the marketing plan. Do not remove them to make the table look better; this
+  audience runs benchmarks themselves, and the honesty is the most on-brand
+  asset we own.
+
+  No availability number appears anywhere. `docs/legal/TERMS.md` §2.3 refuses to
+  state one until a production quarter has been measured.
+-->
+
+<style>
+  :root {
+    --ink: #14161a; --mute: #5b6270; --line: #e4e7ec; --bg: #fff;
+    --accent: #1f4bd8; --warn: #b3261e; --good: #1a6d3a; --code: #f6f7f9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e9ebef; --mute: #99a1ad; --bg: #101216; --line: #262a32;
+      --accent: #8aa6ff; --warn: #ef8a80; --good: #6ec48f; --code: #181b21;
+    }
+  }
+  :root[data-theme="light"] {
+    --ink: #14161a; --mute: #5b6270; --line: #e4e7ec; --bg: #fff;
+    --accent: #1f4bd8; --warn: #b3261e; --good: #1a6d3a; --code: #f6f7f9;
+  }
+  :root[data-theme="dark"] {
+    --ink: #e9ebef; --mute: #99a1ad; --bg: #101216; --line: #262a32;
+    --accent: #8aa6ff; --warn: #ef8a80; --good: #6ec48f; --code: #181b21;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.25rem; }
+  header { padding: 5rem 0 3rem; }
+  h1 {
+    font-size: clamp(2rem, 5.5vw, 3.1rem); line-height: 1.08;
+    letter-spacing: -0.03em; margin: 0 0 1.25rem; font-weight: 650;
+  }
+  h2 {
+    font-size: 1.45rem; letter-spacing: -0.02em; margin: 3.5rem 0 1rem;
+    font-weight: 620;
+  }
+  h3 { font-size: 1.05rem; margin: 2rem 0 .5rem; }
+  .lede { font-size: 1.2rem; color: var(--mute); margin: 0 0 2rem; }
+  a { color: var(--accent); }
+  pre {
+    background: var(--code); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1rem 1.1rem; overflow-x: auto; font-size: .875rem; line-height: 1.55;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+  p code, li code, td code { background: var(--code); padding: .1em .35em; border-radius: 4px; }
+  .cta { display: flex; gap: .75rem; flex-wrap: wrap; margin: 2rem 0 1rem; }
+  .btn {
+    display: inline-block; padding: .7rem 1.15rem; border-radius: 9px;
+    text-decoration: none; font-weight: 550; font-size: .95rem;
+    border: 1px solid var(--line); color: var(--ink);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .note { color: var(--mute); font-size: .9rem; }
+  .scroll { overflow-x: auto; margin: 1rem 0; }
+  table {
+    width: 100%; border-collapse: collapse; font-size: .84rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  th, td { padding: .45rem .6rem; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { border-bottom: 2px solid var(--ink); font-weight: 600; }
+  .win { color: var(--good); } .lose { color: var(--warn); }
+  .callout {
+    border-left: 3px solid var(--accent); padding: .1rem 0 .1rem 1.1rem;
+    margin: 1.75rem 0; color: var(--ink);
+  }
+  ul.tight li { margin: .45rem 0; }
+  footer {
+    margin-top: 5rem; padding: 2rem 0 4rem; border-top: 1px solid var(--line);
+    color: var(--mute); font-size: .9rem;
+  }
+  footer a { color: var(--mute); }
+</style>
+
+<div class="wrap">
+
+<header>
+  <h1>The safety gate belongs inside the database, not in front of it.</h1>
+  <p class="lede">
+    ThetaBase is a branchable database for teams whose agents write to production.
+    A rule-based classifier decides which schema changes need a human — and it
+    runs inside the engine, where a connection string cannot route around it.
+  </p>
+
+  <div class="cta">
+    <a class="btn primary" href="#start">Install</a>
+    <a class="btn" href="/pricing">Pricing</a>
+    <a class="btn" href="/docs">Docs</a>
+  </div>
+</header>
+
+<h2>In April 2026, an agent deleted a production database and its backups</h2>
+
+<p>
+  A Cursor agent running Claude Opus 4.6 destroyed PocketOS's database through a
+  single Railway API call. Railway
+  <a href="https://blog.railway.com/p/your-ai-wants-to-nuke-your-database">wrote
+  it up</a> and shipped guardrails in response.
+</p>
+
+<p>
+  You already know agents can do this. The question is what stops it — and most
+  answers stop it in a proxy, which is a thing an agent with your connection
+  string steps around.
+</p>
+
+<div class="callout">
+  <p>
+    <strong>A control plane can be bypassed by opening a connection. A gate
+    inside the engine cannot.</strong>
+  </p>
+</div>
+
+<h2 id="start">Ninety seconds to watch it work</h2>
+
+<pre>curl -fsSL https://thetabase.dev/install.sh | sh
+
+theta login github
+theta use acme checkout --create     <span class="note"># provisions in one round trip</span>
+theta demo                           <span class="note"># seeds a table to work against</span>
+theta schema propose drop-legacy-ref.json</pre>
+
+<p>That last command proposes dropping a column five rows depend on. Instead of
+dropping it:</p>
+
+<pre>chg_8f2a
+  drop column on customers.legacy_ref — 5 row(s), irreversible
+  A destructive change on a protected branch needs a human.
+
+Validated on shadow branch 2. Review it, then:
+  theta schema show chg_8f2a
+  theta schema promote chg_8f2a
+  theta schema reject chg_8f2a --reason "..."</pre>
+
+<p>
+  The change was applied to a <strong>shadow branch</strong> and validated
+  there, so what comes back already says what the checks found. Nothing touched
+  <code>main</code>.
+</p>
+
+<p class="note">
+  <strong>A change you confirm still happens.</strong>
+  <code>theta schema promote</code> drops the column. The gate exists to make
+  sure a person decided — not to decide for them.
+</p>
+
+<h2>The rules decide what a human ever has to look at</h2>
+
+<p>
+  The other approach is "branch everything, a human reads the diff." That does
+  not survive the first busy week: a person reading every diff is a person who
+  starts approving without reading, and then the review is decorative.
+</p>
+
+<p>ThetaBase classifies first. Only the destructive minority reaches anybody.</p>
+
+<ul class="tight">
+  <li>
+    <strong>Rule-based, never model-inferred.</strong> Classification is a pure
+    function of the change kind, the rows it touches, whether it is reversible,
+    and whether the branch is protected. There is no prompt to inject, because
+    there is no model in the decision.
+  </li>
+  <li>
+    <strong>Three tiers, not a yes/no.</strong> Safe changes apply. Destructive
+    ones need a confirmation. The irreversible, high-impact ones cannot be
+    cleared by confirmation at all — they are validated on a shadow branch and
+    promoted.
+  </li>
+  <li>
+    <strong>A blast-radius breaker</strong> for the case where every individual
+    write is fine and the sequence is not.
+  </li>
+</ul>
+
+<h2>Branching, measured against the alternatives</h2>
+
+<p class="note">
+  ThetaBase, Dolt 2.3.1 and PostgreSQL 16, same host, same run, same 20,000-row
+  workload. 2026-08-27.
+</p>
+
+<div class="scroll">
+<table>
+  <thead>
+    <tr>
+      <th></th><th>read @root</th><th>read @depth</th>
+      <th>fork small</th><th>fork large</th><th>write</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>thetabase</td><td>634µs</td><td>657µs</td>
+      <td class="win">1,485µs</td><td class="win">1,339µs</td><td>1,575µs</td>
+    </tr>
+    <tr>
+      <td>dolt 2.3.1</td><td>781µs</td><td>778µs</td>
+      <td>4,983µs</td><td>5,051µs</td><td>3,325µs</td>
+    </tr>
+    <tr>
+      <td>postgres:16</td><td class="lose">540µs</td><td class="lose">517µs</td>
+      <td>25,668µs</td><td>27,664µs</td><td class="lose">514µs</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  <strong>Branch creation is 3.7× faster than Dolt and 19× faster than
+  PostgreSQL, and does not scale with the size of the parent.</strong> That is
+  the claim, and it is the only one this table supports.
+</p>
+
+<p class="note">
+  The rows in red are ours to lose: PostgreSQL reads faster at the root and
+  writes three times faster than we do. They are here because you would find
+  them yourself, and because a database that overstates its guarantees is the
+  last thing you want gating your production schema.
+</p>
+
+<h2>What you get, and what you do not</h2>
+
+<ul class="tight">
+  <li><strong>Branches are free</strong> — on every plan, including the free one.
+      Structural sharing means a branch copies no data, so it costs us almost
+      nothing and we are not going to pretend otherwise.</li>
+  <li><strong>Your data leaves whenever you want.</strong> <code>theta eject</code>
+      exports to a standard form and runs without our involvement. Your ability
+      to leave should not depend on our cooperation.</li>
+  <li><strong>An append-only log</strong> is the only source of truth. Every
+      state is a fold over it, so "what happened and who did it" is answerable.</li>
+  <li><strong>An MCP server</strong>, so your agent talks to the database
+      through the same gates you do — and cannot confirm its own proposals.</li>
+  <li><strong>No SLA yet.</strong> We have not run a production quarter, so we
+      are not publishing an availability number. When we have measured one, it
+      will be here.</li>
+</ul>
+
+<div class="cta">
+  <a class="btn primary" href="#start">Install</a>
+  <a class="btn" href="/pricing">See pricing</a>
+</div>
+
+<footer>
+  <p>
+    <a href="/pricing">Pricing</a> ·
+    <a href="/docs">Documentation</a> ·
+    <a href="/terms">Terms</a> ·
+    <a href="/privacy">Privacy</a>
+  </p>
+</footer>
+
+</div>

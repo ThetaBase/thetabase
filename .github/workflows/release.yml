@@ -1,0 +1,131 @@
+# Release binaries for the `theta` CLI.
+#
+# The CLI is the product, so this is the distribution channel — not a
+# convenience. Until this runs, a prospect who wants to try ThetaBase has no way
+# to install it, which makes every acquisition channel a call to action nobody
+# can follow (`docs/business/SALES-REVIEW.md`).
+#
+# Fires on a version tag, never on a branch. A release you cannot name is a
+# release you cannot support, and `latest` is how somebody ends up unable to say
+# which build a customer is running.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # So the build can be proved before a tag exists, without publishing.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One target failing must not cancel the others: a partial release that
+      # is missing macOS is better information than no release at all.
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # `theta-proto` generates from a Cap'n Proto schema at build time.
+      - name: Install capnp (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+
+      - name: Install capnp (macOS)
+        if: runner.os == 'macOS'
+        run: brew install capnp
+
+      - name: Install capnp (Windows)
+        if: runner.os == 'Windows'
+        run: choco install capnproto --no-progress
+
+      # Cross-linking aarch64 from an x86 runner needs the GNU cross toolchain.
+      - name: Cross-compilation toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      # `--locked` refuses to update Cargo.lock. A released binary built from a
+      # dependency tree nobody tested is a binary nobody tested.
+      - name: Build
+        run: cargo build --release --locked -p theta-cli --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="theta-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/theta" "dist/$name/"
+          cp README.md "dist/$name/" 2>/dev/null || true
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          # Checksums beside the artefact. A download nobody can verify is a
+          # supply-chain step somebody else can take for us.
+          shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "theta-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/theta.exe" "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower() |
+            Out-File -Encoding ascii "dist/$name.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    # Only a tag publishes. `workflow_dispatch` proves the build and stops.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # Draft, deliberately. The release notes are the first thing many
+          # people read about a version, and they should be written by somebody
+          # rather than generated and published in the same breath.
+          draft: true
+          generate_release_notes: true

@@ -1,0 +1,81 @@
+# One project's `thetad`. A template — the Control Plane fills in the app name
+# and the per-project secrets when it provisions.
+#
+# # This file is hibernation
+#
+# `auto_stop_machines = "stop"` and `min_machines_running = 0` are the whole of
+# what #26 was going to build against ECS: the proxy watches connections, stops
+# the machine when there are none, and starts it again on the next one — holding
+# the client while it comes up.
+#
+# It works here and not on Fargate because of what "stopped" means. A stopped
+# Firecracker machine keeps its rootfs and resumes in 200–500ms. A stopped ECS
+# task does not exist: waking it means scheduling onto capacity, attaching an
+# ENI and re-pulling the image, which is 10–90 seconds. Hibernation is only
+# viable on a platform that can resume a stopped VM.
+#
+# # What it costs and what it saves
+#
+# Stopped: about $0.15/month for the rootfs. Running: about $2. That difference
+# is what makes a free tier affordable — see `docs/business/PROFITABILITY.html`.
+#
+# # The other half of the wake is ours
+#
+# `Engine::open` costs ~1.3µs per row: 13ms at ten thousand rows, 131ms at a
+# hundred thousand (`specs/09` §2.3). Add the platform's 200–500ms. Small
+# projects — the ones that hibernate — fit the 500ms p50 budget comfortably.
+
+app = "PROJECT_APP_NAME"           # set at provisioning
+primary_region = "iad"             # follows the project's recorded region
+
+[build]
+  dockerfile = "../Dockerfile.thetad"
+
+[env]
+  RUST_LOG = "info"
+
+[http_service]
+  internal_port = 7777
+  force_https = true
+
+  # Hibernation.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  # A project serves one tenant. A soft limit above what one tenant generates
+  # would let a busy neighbour queue behind them — except there is no
+  # neighbour, which is the point of one machine per project.
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 50
+    hard_limit = 100
+
+# Right-sized deliberately. `get` measures 104µs p50 against a 5ms target, so a
+# small project has room to spare; a project that needs more gets more because
+# it was measured to, not by default. Sizing every machine for the largest
+# customer is how a per-project architecture stops being affordable.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+# The log lives here. Segments are archived to object storage, but the working
+# set is on the volume — and a stopped machine keeps it, which is why waking is
+# a resume rather than a restore.
+[mounts]
+  source = "thetabase_data"
+  destination = "/var/lib/thetabase"
+  initial_size = "1gb"
+
+# ---- production projects -----------------------------------------------------
+#
+# A production instance must answer at any hour with no cold start, so the
+# Control Plane provisions it from this file with two settings changed:
+#
+#   auto_stop_machines   = false
+#   min_machines_running = 1
+#
+# That is the same distinction `Hibernation::may_hibernate` makes in code, and
+# the same one the plans bill on: production instances are metered because they
+# are the only always-on resource. Keeping the two in one place is deliberate —
+# a customer is charged for always-on behaviour exactly when they get it.

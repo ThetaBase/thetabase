@@ -1,0 +1,49 @@
+# The storage engine. One container per project — see `docs/DEPLOYMENT.md`.
+#
+# Distroless rather than alpine or slim, and that is a security decision rather
+# than a size one: there is no shell, no package manager and no libc utilities
+# in the final image, so a foothold inside this container has nothing to pivot
+# with. `thetad` needs none of them.
+
+# ---- build -----------------------------------------------------------------
+FROM rust:1.90-bookworm AS build
+
+# capnp is a build-time dependency of `theta-proto`. It is not in the runtime
+# image because nothing generates schemas at runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends capnproto \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Manifests first, so a source-only change does not re-download and rebuild
+# every dependency. This is the difference between a 90-second and a 12-minute
+# image build, and it is the reason the COPY is split.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+# `sdk/rust` is a workspace member, so cargo refuses to load the workspace
+# without it even though nothing here builds it. Omitting it fails at manifest
+# load, before a single crate compiles.
+COPY sdk/rust/ sdk/rust/
+
+# `--locked` refuses to update Cargo.lock. A deployment that silently resolved a
+# different dependency tree from the one CI tested is a deployment of something
+# nobody tested.
+RUN cargo build --release --locked -p thetad
+
+# ---- runtime ---------------------------------------------------------------
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+# Not root, and not by convention — the image has no way to become root.
+USER nonroot:nonroot
+
+COPY --from=build /src/target/release/thetad /usr/local/bin/thetad
+
+# The data directory is a mount point. Baking it into the image would make a
+# container restart look like data loss.
+VOLUME ["/var/lib/thetabase"]
+
+EXPOSE 7777
+
+# No shell form, so there is no shell to inject into.
+ENTRYPOINT ["/usr/local/bin/thetad"]

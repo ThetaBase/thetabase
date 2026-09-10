@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The conformance runner is its own project so the SDK stays a library. A
+       library with a Main in it is a library that ships a test harness. -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ThetaBase</RootNamespace>
+    <AssemblyName>ThetaBase.Conformance</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../src/ThetaBase.csproj" />
+  </ItemGroup>
+
+</Project>

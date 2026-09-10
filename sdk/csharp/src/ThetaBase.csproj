@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net9.0 for `JsonStringEnumMemberName`, which is what lets a generated
+         enum carry its wire spelling. Without it an enum serialises as an
+         integer, and that failure looks like a schema mismatch rather than a
+         naming one. Multi-targeting net8.0 would need a hand-written converter
+         reading `[EnumMember]`; worth doing before this is published, and not
+         worth doing before it works. -->
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ThetaBase</RootNamespace>
+    <AssemblyName>ThetaBase</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- No licence chosen yet; see docs/DISTRIBUTION.md. A NuGet push is a
+         public disclosure, and disclosure ends patent rights outside the US. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Wasmtime's .NET bindings. Unlike Go's wazero and Java's Chicory there
+         is no mature pure-managed WebAssembly runtime for .NET, so this one
+         carries a native library per platform — the NuGet package ships them,
+         so a consumer still installs one package. Worth naming as the one place
+         where a ThetaBase SDK is not pure managed code. -->
+    <PackageReference Include="Wasmtime" Version="22.0.0" />
+  </ItemGroup>
+
+</Project>

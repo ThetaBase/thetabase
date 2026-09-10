@@ -1,0 +1,434 @@
+{
+  "_comment": [
+    "The shared SDK conformance suite (ROADMAP M6 gate).",
+    "",
+    "One list of cases, run by every binding against one live thetad, with the",
+    "outputs compared byte for byte. Two SDKs that each pass their own suite",
+    "prove nothing about whether they agree; two that produce identical output",
+    "from identical input have actually been shown to speak the same protocol.",
+    "",
+    "Cases run in order against one connection, because several of them depend",
+    "on what the ones before them wrote."
+  ],
+  "cases": [
+    {
+      "name": "a read of a key that was never written reports not-found",
+      "expect": {
+        "response.kind": "get",
+        "response.value.found": false
+      },
+      "request": {
+        "op": "get",
+        "key": "users:absent"
+      }
+    },
+    {
+      "name": "a write returns a commit",
+      "expect": {
+        "response.kind": "commit"
+      },
+      "request": {
+        "op": "put",
+        "key": "users:1",
+        "value": {
+          "email": "alice@example.com",
+          "name": "Alice"
+        }
+      },
+      "redact": [
+        "value.commitId"
+      ]
+    },
+    {
+      "name": "a read after a write returns what was written",
+      "expect": {
+        "response.kind": "get",
+        "response.value.found": true,
+        "response.value.value.email": "alice@example.com",
+        "response.value.value.name": "Alice"
+      },
+      "request": {
+        "op": "get",
+        "key": "users:1"
+      }
+    },
+    {
+      "name": "a second write to the same key replaces it",
+      "expect": {
+        "response.kind": "commit"
+      },
+      "request": {
+        "op": "put",
+        "key": "users:1",
+        "value": {
+          "email": "alice@example.org",
+          "name": "Alice"
+        }
+      },
+      "redact": [
+        "value.commitId"
+      ]
+    },
+    {
+      "name": "the replacement is what a later read sees",
+      "expect": {
+        "response.kind": "get",
+        "response.value.value.email": "alice@example.org"
+      },
+      "request": {
+        "op": "get",
+        "key": "users:1"
+      }
+    },
+    {
+      "name": "a second row can be written",
+      "expect": {
+        "response.kind": "commit"
+      },
+      "request": {
+        "op": "put",
+        "key": "users:2",
+        "value": {
+          "email": "bob@example.com",
+          "name": "Bob"
+        }
+      },
+      "redact": [
+        "value.commitId"
+      ]
+    },
+    {
+      "name": "a delete returns a commit",
+      "expect": {
+        "response.kind": "commit"
+      },
+      "request": {
+        "op": "delete",
+        "key": "users:2"
+      },
+      "redact": [
+        "value.commitId"
+      ]
+    },
+    {
+      "name": "a deleted key reads as not-found",
+      "expect": {
+        "response.kind": "get",
+        "response.value.found": false
+      },
+      "request": {
+        "op": "get",
+        "key": "users:2"
+      }
+    },
+    {
+      "name": "adding a nullable column is auto-applied",
+      "expect": {
+        "response.kind": "propose",
+        "response.value.gate": "AutoApply",
+        "response.value.destructive": false
+      },
+      "request": {
+        "op": "proposeSchemaChange",
+        "change": {
+          "change": "add_column",
+          "table": "users",
+          "field": {
+            "name": "nickname",
+            "ty": "text",
+            "nullable": true
+          }
+        }
+      },
+      "redact": [
+        "value.changeId"
+      ]
+    },
+    {
+      "name": "dropping a populated column is gated rather than applied",
+      "expect": {
+        "response.kind": "propose",
+        "response.value.gate": "Confirm",
+        "response.value.destructive": true,
+        "response.value.requiresConfirm": true
+      },
+      "request": {
+        "op": "proposeSchemaChange",
+        "change": {
+          "change": "drop_column",
+          "table": "users",
+          "column": "email"
+        }
+      },
+      "redact": [
+        "value.changeId",
+        "value.shadowBranchId",
+        "value.estimatedCostMs"
+      ]
+    },
+    {
+      "name": "branches can be listed",
+      "expect": {
+        "response.kind": "branches"
+      },
+      "request": {
+        "op": "listBranches"
+      },
+      "_redactWhy": "the head is a content hash over a log carrying timestamps, so two runs of the same writes differ legitimately",
+      "redact": [
+        "value"
+      ]
+    },
+    {
+      "name": "the audit trail is readable",
+      "expect": {
+        "response.kind": "audit"
+      },
+      "request": {
+        "op": "audit",
+        "limit": 3,
+        "minRisk": 0
+      },
+      "redact": [
+        "value"
+      ]
+    },
+    {
+      "name": "status reports the project",
+      "expect": {
+        "response.kind": "status"
+      },
+      "request": {
+        "op": "status"
+      },
+      "redact": [
+        "value.writeVolumeMB",
+        "value.storageBytes",
+        "value.breakerWindowRows",
+        "value.commitsApplied",
+        "value.rowsWritten"
+      ]
+    },
+    {
+      "name": "a query over what was written returns rows",
+      "expect": {
+        "response.kind": "query"
+      },
+      "request": {
+        "op": "query",
+        "sql": "SELECT email FROM users"
+      },
+      "redact": [
+        "value.resultSetBase64",
+        "value.planHash"
+      ]
+    },
+    {
+      "name": "a SQL literal is bound and never becomes syntax",
+      "expect": {
+        "response.kind": "query",
+        "response.value.rowCount": 0
+      },
+      "request": {
+        "op": "query",
+        "sql": "SELECT email FROM users WHERE name = $name",
+        "params": {
+          "name": "'; DROP TABLE users; --"
+        }
+      },
+      "redact": [
+        "value.resultSetBase64",
+        "value.planHash"
+      ]
+    },
+    {
+      "name": "the table survived that query",
+      "expect": {
+        "response.kind": "get"
+      },
+      "request": {
+        "op": "get",
+        "key": "users:1"
+      }
+    },
+    {
+      "name": "a branch cannot be named by string on the wire",
+      "expect": "clientError",
+      "request": {
+        "op": "merge",
+        "source": "feature-x",
+        "into": "main"
+      },
+      "expectClientError": true
+    },
+    {
+      "name": "an unknown operation is refused by the core, not the server",
+      "expect": "clientError",
+      "request": {
+        "op": "definitelyNotAnOperation"
+      },
+      "expectClientError": true
+    },
+    {
+      "name": "a create-only write lands when the row is absent",
+      "expect": {
+        "response.kind": "commit"
+      },
+      "request": {
+        "op": "putIf",
+        "key": "conditional:1",
+        "value": {
+          "balance": 100
+        },
+        "expect": {
+          "kind": "absent"
+        }
+      },
+      "redact": [
+        "value.commitId"
+      ]
+    },
+    {
+      "name": "a second create-only write on the same row is refused",
+      "expect": {
+        "response.kind": "preconditionFailed",
+        "response.value.found": true
+      },
+      "request": {
+        "op": "putIf",
+        "key": "conditional:1",
+        "value": {
+          "balance": 999
+        },
+        "expect": {
+          "kind": "absent"
+        }
+      }
+    },
+    {
+      "name": "the refused write did not land",
+      "expect": {
+        "response.kind": "get",
+        "response.value.found": true
+      },
+      "request": {
+        "op": "get",
+        "key": "conditional:1"
+      },
+      "redact": [
+        "value.versionId"
+      ]
+    },
+    {
+      "name": "a conditional write on a stale version is refused with the current one",
+      "expect": {
+        "response.kind": "preconditionFailed",
+        "response.value.found": true
+      },
+      "request": {
+        "op": "putIf",
+        "key": "conditional:1",
+        "value": {
+          "balance": 50
+        },
+        "expect": {
+          "kind": "version",
+          "value": 0
+        }
+      },
+      "redact": [
+        "value.actual"
+      ]
+    }
+  ],
+  "_queryComment": [
+    "The typed builder is checked separately: it renders rather than calls, so",
+    "these cases need no server. Each binding builds the query with its own",
+    "fluent API and the rendered output is compared — a builder that produced a",
+    "different query from the same calls would be a different query language",
+    "wearing the same method names."
+  ],
+  "queries": [
+    {
+      "name": "a plain select needs no parameters",
+      "expect": {
+        "rendered.sql": "SELECT * FROM users"
+      },
+      "build": {
+        "table": "users"
+      }
+    },
+    {
+      "name": "a value becomes a bound parameter",
+      "expect": {
+        "rendered.sql": "SELECT * FROM users WHERE email = $p0"
+      },
+      "build": {
+        "table": "users",
+        "where": [
+          [
+            "eq",
+            "email",
+            "alice@example.com"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "a value carrying SQL is still only a value",
+      "expect": {
+        "rendered.sql": "SELECT * FROM users WHERE name = $p0",
+        "rendered.params.p0": "\"'; DROP TABLE users; --\""
+      },
+      "build": {
+        "table": "users",
+        "where": [
+          [
+            "eq",
+            "name",
+            "'; DROP TABLE users; --"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "repeated filters are ANDed and parenthesised",
+      "expect": "ok",
+      "build": {
+        "table": "users",
+        "select": [
+          "email",
+          "name"
+        ],
+        "where": [
+          [
+            "gte",
+            "age",
+            18
+          ],
+          [
+            "eq",
+            "city",
+            "Berlin"
+          ]
+        ],
+        "orderBy": [
+          [
+            "email",
+            true
+          ]
+        ],
+        "limit": 10,
+        "offset": 5
+      }
+    },
+    {
+      "name": "an identifier that could carry syntax is refused",
+      "expect": "clientError",
+      "build": {
+        "table": "users; DROP TABLE x"
+      },
+      "expectClientError": true
+    }
+  ]
+}

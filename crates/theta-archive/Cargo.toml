@@ -1,0 +1,36 @@
+[package]
+name = "theta-archive"
+description = "Cold archive: log segments to object storage via AT-1, with verified restore."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "FSL-1.1-MIT"
+repository.workspace = true
+publish.workspace = true
+[features]
+# Bring your own object storage (M10). Off by default, like the KMS wrapper and
+# for the same reason: a build that will never touch a bucket should not carry
+# an S3 SDK. AT-1 needs no feature because it drives a CLI as a subprocess.
+s3 = ["dep:aws-config", "dep:aws-sdk-s3", "dep:zstd", "tokio/rt-multi-thread"]
+
+[dependencies]
+aws-config = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", optional = true }
+zstd = { version = "0.13", optional = true }
+theta-core.workspace = true
+theta-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+tracing.workspace = true
+# `time` and `sync` for the sweep scheduler; no `rt`, because this crate never
+# starts a runtime — it runs on whichever one the host already has.
+tokio = { workspace = true, features = ["time", "sync", "macros"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+# `test-util` for the paused clock: the scheduler's behaviour over an hour is
+# asserted in microseconds, and a loop tested with real sleeps is one nobody
+# will ever assert more than a single tick of.
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

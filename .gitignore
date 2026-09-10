@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+.thetabase/
+node_modules/
+dist/
+__pycache__/
+*.egg-info/
+.venv/
+.env
+.DS_Store
+# The App's private key and webhook secret live outside the repo by design;
+# these are belt and braces in case someone points a script at the wrong root.
+secrets/
+*.pem
+!crates/theta-control/tests/fixtures/test_app_key.pem
+.thetabase-instances/

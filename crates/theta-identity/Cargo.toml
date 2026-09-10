@@ -1,0 +1,19 @@
+[package]
+name = "theta-identity"
+description = "ThetaBase scoped session tokens: per-project signing keys, verification, and revocation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "FSL-1.1-MIT"
+repository.workspace = true
+publish.workspace = true
+[dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

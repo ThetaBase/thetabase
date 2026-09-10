@@ -1,0 +1,21 @@
+[package]
+name = "theta-codegen"
+description = "Generates the ThetaBase SDK surfaces from the Cap'n Proto schema."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "FSL-1.1-MIT"
+repository.workspace = true
+publish.workspace = true
+[lib]
+name = "theta_codegen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "theta-codegen"
+path = "src/main.rs"
+
+[dependencies]
+capnp.workspace = true
+capnpc-embedded.workspace = true
+anyhow.workspace = true

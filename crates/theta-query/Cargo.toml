@@ -1,0 +1,21 @@
+[package]
+name = "theta-query"
+description = "ThetaBase query planner: typed plan IR, SQL-subset compiler, EXPLAIN, deterministic bytecode plans."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "FSL-1.1-MIT"
+repository.workspace = true
+publish.workspace = true
+[dependencies]
+theta-core.workspace = true
+arrow-array.workspace = true
+arrow-ipc.workspace = true
+arrow-schema.workspace = true
+theta-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

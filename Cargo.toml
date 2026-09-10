@@ -1,0 +1,144 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/theta-core",
+    "crates/theta-storage",
+    "crates/theta-query",
+    "crates/theta-safety",
+    "crates/theta-identity",
+    "crates/theta-archive",
+    "crates/theta-codegen",
+    "crates/theta-proto",
+    "crates/theta-scribe",
+    "crates/theta-scribe-wasm",
+    "crates/thetad",
+    "crates/theta-cli",
+    "crates/theta-mcp",
+    "crates/theta-eject",
+    "crates/theta-embed",
+    # The Rust SDK is a workspace member rather than a separate build. It is the
+    # one SDK whose gate is `cargo test`, because it links the Scribe core
+    # instead of loading it through a WASM runtime — so `cargo clippy
+    # --workspace` covers it and it cannot drift from the crates it wraps.
+    "sdk/rust",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.90"
+# No licence has been chosen yet, and this field must not pretend otherwise.
+# `docs/DISTRIBUTION.md` records the decision as pending until IP protection is
+# filed; until then the honest statement is that no rights are granted.
+#
+# Apache-2.0 sat here until it was noticed. That is not a tidy-up: Apache-2.0 §3
+# grants every recipient a royalty-free patent licence, so publishing under it
+# would have given away the one thing the filing is meant to secure.
+license = "LicenseRef-Proprietary"  # workspace default; each crate overrides it per DECISION-licence.md
+repository = "https://github.com/FelixKramer/ThetaBase"
+# Inherited by every crate. A `cargo publish` is a public disclosure, and a
+# public disclosure ends patent rights outside the US on the day it happens —
+# there is no grace period in Europe. This is the mechanical guard on that, and
+# `release_guard.rs` is the test that keeps it here.
+publish = false
+
+[workspace.dependencies]
+theta-core = { path = "crates/theta-core" }
+theta-storage = { path = "crates/theta-storage" }
+theta-query = { path = "crates/theta-query" }
+theta-safety = { path = "crates/theta-safety" }
+theta-identity = { path = "crates/theta-identity" }
+theta-proto = { path = "crates/theta-proto" }
+theta-eject = { path = "crates/theta-eject" }
+theta-assist = { path = "crates/theta-assist" }
+theta-scribe = { path = "crates/theta-scribe" }
+# Named for how it is usually compiled, not for what it contains. The crate is
+# Scribe's protocol core; `crate-type` has always included `rlib` so a Rust
+# caller can link it, and the Rust SDK is what that was for.
+theta-scribe-wasm = { path = "crates/theta-scribe-wasm" }
+# The engine itself, so the embedded facade links the same one the server runs
+# rather than a subset of it (M22).
+thetad = { path = "crates/thetad" }
+
+anyhow = "1"
+thiserror = "2"
+blake3 = "1"
+# "rc" so `Arc<T>` derives Serialize/Deserialize. The materialized view shares
+# its maps with the branch it was forked from until something writes (M10.6),
+# and the view snapshot has to round-trip through that. Serde does not preserve
+# the sharing across a serialize - each Arc is written out in full - which is
+# exactly what the snapshot did before, one complete view per branch.
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net", "io-util", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+proptest = "1"
+crc32fast = "1"
+base64 = "0.22"
+ed25519-dalek = { version = "3", features = ["rand_core", "pkcs8"] }
+# GitHub signs webhooks with HMAC-SHA256; nothing else in the tree needs it.
+hmac = "0.13"
+# The review screen. Pure Rust, no C dependency, and the only crate in the CLI
+# that touches a terminal — the state machine it drives has none.
+ratatui = "0.29"
+crossterm = "0.28"
+# GitHub Apps authenticate with an RS256 JWT signed by the app private key.
+# rust_crypto rather than aws_lc_rs: a pure-Rust provider keeps the build free
+# of a C toolchain, and jsonwebtoken 11 requires exactly one to be chosen.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
+sha2 = "0.11"
+# Envelope encryption for the Control Plane's signing keys: the key material is
+# wrapped before it reaches storage, so a database compromise is not a forgery
+# compromise. RustCrypto, matching hmac/sha2 already here.
+aes-gcm = "0.10"
+# The Control Plane holds its store behind a trait object, and `async fn` in a
+# trait is not dyn-compatible. The boxed future costs an allocation per store
+# call, which is once per request at most and never on the data path.
+async-trait = "0.1"
+getrandom = "0.3"
+arrow-array = "56"
+arrow-ipc = "56"
+arrow-schema = "56"
+capnp = "0.27"
+capnpc = "0.27"
+capnpc-embedded = "0.2"
+tempfile = "3"
+# Structurally-shared immutable maps for the materialized view (M10.6 item 5).
+#
+# Cloning one is O(1) and a write path-copies O(log n) nodes rather than the
+# whole map, so a forked branch pays nothing at fork *and* nothing extra on its
+# first write. Measured against `std::BTreeMap` before adopting: reads cost
+# 59ns -> 110ns, which is 0.001% of the 5ms `get` p50 it sits inside, and the
+# first write to a shared 220,000-row map went from 148ms to 0.13ms.
+#
+# `imbl` rather than `im`: same author, actively maintained.
+imbl = { version = "3", features = ["serde"] }
+# The claims registry (`docs/claims.toml`) is mostly prose: a statement, the
+# sentence in the spec it must still match, and why. TOML's multi-line strings
+# and comments make that a document a person will actually maintain, which JSON
+# would not — and a registry nobody updates is the failure this gate exists to
+# prevent.
+toml = "0.9"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[profile.bench]
+inherits = "release"
+
+# Scribe ships to the caller's app runtime, so its size is a number every user
+# downloads. Optimised for that rather than for speed: the module's work is
+# encoding a message, which is not where a request's time goes.
+[profile.wasm]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

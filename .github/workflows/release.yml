@@ -97,7 +97,14 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           # Checksums beside the artefact. A download nobody can verify is a
           # supply-chain step somebody else can take for us.
-          shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+          #
+          # Generated from inside `dist` so the file records the archive's own
+          # name and nothing else. Run from the repository root it wrote
+          # `<hash>  dist/theta-...tar.gz`, and install.sh verifies in a
+          # temporary directory where no `dist/` exists -- so every install
+          # failed with "checksum mismatch" on an archive that was perfectly
+          # intact. The bytes were never wrong; the path was.
+          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
 
       - name: Package (windows)
         if: runner.os == 'Windows'
@@ -108,8 +115,12 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/theta.exe" "dist/$name/"
           Copy-Item "target/${{ matrix.target }}/release/theta-mcp.exe" "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
-          (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower() |
-            Out-File -Encoding ascii "dist/$name.zip.sha256"
+          # Same format as the unix side: hash, two spaces, bare filename.
+          # `Get-FileHash` alone writes the hash and nothing else, which no
+          # `sha256sum -c` can read -- and a checksum file that cannot be
+          # checked is decoration.
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii -NoNewline "dist/$name.zip.sha256"
 
       - uses: actions/upload-artifact@v4
         with:

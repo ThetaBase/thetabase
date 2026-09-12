@@ -1,0 +1,37 @@
+# Line endings, fixed rather than left to whoever checked out.
+#
+# `install.sh` shipped with CRLF. Git's `core.autocrlf` converted it on a
+# Windows checkout, `Dockerfile.web` copied the working tree verbatim into the
+# image, and `curl -fsSL https://thetabase.co/install.sh | sh` then failed on
+# every Linux machine with `sh: : not found` -- because a POSIX shell reads the
+# carriage return as part of the command name.
+#
+# Nothing caught it. The script's syntax is valid, `sh -n` passes on Git Bash,
+# and the only test that could ever have seen it is running the published
+# installer on a real Linux box, which is what finally did.
+#
+# So: text files get LF in the repository and LF on checkout, everywhere.
+
+* text=auto eol=lf
+
+# Things that must be LF to function at all, stated explicitly so a future
+# `* text=auto` change cannot quietly take them with it.
+*.sh        text eol=lf
+Makefile    text eol=lf
+*.mk        text eol=lf
+.gitattributes text eol=lf
+
+# Windows-only, and genuinely wants CRLF.
+*.ps1       text eol=crlf
+*.cmd       text eol=crlf
+*.bat       text eol=crlf
+
+# Binary, so Git must not touch the bytes.
+*.png       binary
+*.jpg       binary
+*.ico       binary
+*.pdf       binary
+*.zip       binary
+*.tar.gz    binary
+*.wasm      binary
+*.capnp-bin binary

@@ -65,11 +65,11 @@ docs/
 ## Getting started
 
 ```sh
-curl -fsSL https://thetabase.dev/install.sh | sh
+curl -fsSL https://thetabase.co/install.sh | sh
 ```
 
 Windows: download the `.zip` from
-[Releases](https://github.com/FelixKramer/ThetaBase/releases).
+[Releases](https://github.com/ThetaBase/thetabase/releases).
 
 Then, in about ninety seconds, watch the Safety Layer stop something:
 
@@ -182,3 +182,29 @@ for the full statement and the tests behind each line.
 ## License
 
 Apache-2.0.
+
+
+## What is not in this repository, and why
+
+This is an export. Some of the tree is not published, and files here cite
+documents you will not find -- `docs/ROADMAP.md` in a test comment,
+`docs/claims.toml` in the workspace manifest. Those pointers are accurate; the
+documents are private. They are left as written rather than scrubbed, because a
+citation rewritten to hide its target is worse than one you cannot follow.
+
+**Not published, and not planned to be:**
+
+- `theta-control` and `theta-assist`. The Control Plane and Query-Assist are
+  proprietary. `DECISION-licence.md` fixed that before the patent was filed, and
+  saying so plainly beats a repository that quietly omits them.
+- The roadmaps. They describe mechanisms that are not built, and publication is
+  an absolute-novelty bar outside the United States for anything in them worth
+  filing. US provisional 64/151,729 covers what it covers.
+- Operational material -- runbooks, deployment configuration, the account of
+  which review findings are outstanding. That is a map of a service that is
+  running.
+- The claims register, the marketing plan, and the internal decision records.
+
+**What is here** is the engine and its tests, all eight clients, the wire
+protocol, the nine design specifications, and the benchmarks -- including the
+rows where PostgreSQL beats us, which are published deliberately.

@@ -138,11 +138,18 @@ class ScribeCore:
 
 def _default_module() -> Path:
     """Find the core next to the package, then in the build tree."""
+    # `here` is `sdk/python/src/thetabase`, so the repository root is
+    # `parents[3]`. It was `parents[4]` — one level above the checkout — which
+    # meant the build-tree fallback never resolved and the only way to load the
+    # core from a checkout was to pass its path by hand. Nothing caught it
+    # because the conformance runners do exactly that.
     here = Path(__file__).resolve().parent
     candidates = [
+        # Beside the package: how it is laid out once installed.
         here / "theta_scribe_wasm.wasm",
         here.parents[2] / "theta_scribe_wasm.wasm",
-        here.parents[4] / "target/wasm32-unknown-unknown/wasm/theta_scribe_wasm.wasm",
+        # In the build tree: how it is laid out in a checkout.
+        here.parents[3] / "target/wasm32-unknown-unknown/wasm/theta_scribe_wasm.wasm",
     ]
     for candidate in candidates:
         if candidate.exists():

@@ -73,8 +73,16 @@ jobs:
 
       # `--locked` refuses to update Cargo.lock. A released binary built from a
       # dependency tree nobody tested is a binary nobody tested.
+      # Both binaries a user is told to run.
+      #
+      # This built `theta-cli` alone, while the documentation tells people to
+      # put ThetaBase in their agent's tool list with `theta exec -- theta-mcp`
+      # -- a binary the release did not ship. An instruction that names
+      # something the download does not contain is the same class of defect as
+      # a dead link, and harder to notice.
       - name: Build
-        run: cargo build --release --locked -p theta-cli --target ${{ matrix.target }}
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}             -p theta-cli -p theta-mcp
 
       - name: Package (unix)
         if: runner.os != 'Windows'
@@ -84,6 +92,7 @@ jobs:
           name="theta-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/theta" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/theta-mcp" "dist/$name/"
           cp README.md "dist/$name/" 2>/dev/null || true
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           # Checksums beside the artefact. A download nobody can verify is a
@@ -97,6 +106,7 @@ jobs:
           $name = "theta-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/theta.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.target }}/release/theta-mcp.exe" "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
           (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower() |
             Out-File -Encoding ascii "dist/$name.zip.sha256"

@@ -196,6 +196,25 @@ fn walk(plan: &Plan, stats: &Statistics, base_rows: u64, budget: Option<u64>) ->
             )
         }
 
+        // Outer rows multiplied by the inner side, which is exactly what the
+        // executor does. No budget to the outer side, matching the executor:
+        // an outer row may produce no matches or several, so stopping it early
+        // could stop before the result reached the limit.
+        //
+        // The inner cost is charged once per outer row rather than once, which
+        // is the number a reader of a nested loop needs. An inner point lookup
+        // over ten thousand outer rows is ten thousand lookups, and an estimate
+        // that charged one would make the plan look free.
+        Plan::Join { outer, inner, .. } => {
+            let (outer_rows, outer_us) = walk(outer, stats, base_rows, None);
+            let (inner_rows, inner_us) = walk(inner, stats, base_rows, None);
+            let rows = outer_rows.saturating_mul(inner_rows);
+            (
+                budget.map_or(rows, |b| rows.min(b)),
+                cost::NODE_OVERHEAD_US + outer_us + outer_rows as f64 * inner_us,
+            )
+        }
+
         // Independent of table size: that is the whole point of a point lookup,
         // and the estimate should make the difference obvious.
         Plan::PointLookup { .. } => (1, cost::NODE_OVERHEAD_US + cost::POINT_LOOKUP_US),

@@ -20,10 +20,13 @@
 //! the isolation rule the rest of the daemon follows: no code path accepts work
 //! spanning two project identifiers (`04-threat-model-security.md` §3).
 
+use base64::Engine as _;
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+
+use theta_core::DataKey;
 
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +47,20 @@ pub enum AuditStoreError {
 
     #[error("audit log is not readable as an audit log: {0}")]
     Malformed(String),
+
+    /// A sealed entry that will not open under the key this store was given.
+    ///
+    /// Reported as a wrong key rather than as corruption, and never treated as
+    /// a truncated tail. The reader stops at a half-written line because a
+    /// crash mid-append leaves one; doing that here would mean starting with
+    /// the wrong key silently produced an empty audit trail that looked
+    /// complete.
+    #[error(
+        "an audit entry in {path} will not open under this key; \
+         the log is sealed and {}",
+        "either the key is wrong or it belongs to another project"
+    )]
+    WrongKey { path: std::path::PathBuf },
 
     #[error(
         "audit log at {path} belongs to project `{found}`, but this instance serves `{expected}`"
@@ -69,6 +86,13 @@ pub struct AuditStore {
     path: PathBuf,
     project_id: String,
     file: File,
+    /// The key new entries are sealed with, if this deployment has one.
+    ///
+    /// `None` means the log is written in clear, which is what every
+    /// deployment did before this existed and what one without
+    /// `THETA_DATA_KEY` still does. The engine says so at startup, at `warn`,
+    /// the same way it does for the segment store.
+    key: Option<DataKey>,
     recent: VecDeque<AuditEntry>,
     total: u64,
 }
@@ -85,12 +109,26 @@ impl std::fmt::Debug for AuditStore {
 
 impl AuditStore {
     /// Open (or create) the audit log for one project under `dir`.
+    ///
+    /// Unsealed. Kept so the many callers that never had a key do not all grow
+    /// a `None`, and so the clear-text behaviour stays the thing you get by
+    /// asking for it rather than by forgetting something.
     pub fn open(dir: &Path, project_id: &str) -> Result<Self> {
+        Self::open_with_key(dir, project_id, None)
+    }
+
+    /// Open (or create) the audit log, sealing new entries under `key`.
+    ///
+    /// An existing log does not have to be all one thing. Entries already
+    /// written in clear stay readable and new ones are sealed, so encryption
+    /// can be switched on for a project that has been running -- the same
+    /// property the segment store has, for the same reason.
+    pub fn open_with_key(dir: &Path, project_id: &str, key: Option<DataKey>) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("audit.jsonl");
 
         let (recent, total) = match path.exists() {
-            true => Self::read_existing(&path, project_id)?,
+            true => Self::read_existing(&path, project_id, key.as_ref())?,
             false => {
                 let mut file = File::create(&path)?;
                 let header = Header {
@@ -109,13 +147,18 @@ impl AuditStore {
             path,
             project_id: project_id.to_string(),
             file,
+            key,
             recent,
             total,
         })
     }
 
     /// Read an existing log, checking it belongs to this project.
-    fn read_existing(path: &Path, project_id: &str) -> Result<(VecDeque<AuditEntry>, u64)> {
+    fn read_existing(
+        path: &Path,
+        project_id: &str,
+        key: Option<&DataKey>,
+    ) -> Result<(VecDeque<AuditEntry>, u64)> {
         let reader = BufReader::new(File::open(path)?);
         let mut lines = reader.lines();
 
@@ -141,11 +184,21 @@ impl AuditStore {
             if line.trim().is_empty() {
                 continue;
             }
-            // A half-written final line is what a crash mid-append leaves. Stop
-            // there and keep everything before it: a truncated tail loses the
-            // last event, where refusing to open loses the whole trail.
-            let Ok(entry) = serde_json::from_str::<AuditEntry>(&line) else {
-                break;
+            let entry = match Self::read_line(&line, key) {
+                // A half-written final line is what a crash mid-append leaves.
+                // Stop there and keep everything before it: a truncated tail
+                // loses the last event, where refusing to open loses the whole
+                // trail.
+                LineOutcome::Unreadable => break,
+                LineOutcome::Entry(entry) => *entry,
+                // Not a truncation. A sealed line that will not decrypt means
+                // the key is wrong, and continuing would hand back a short
+                // trail that looks complete.
+                LineOutcome::WrongKey => {
+                    return Err(AuditStoreError::WrongKey {
+                        path: path.to_path_buf(),
+                    })
+                }
             };
             total += 1;
             recent.push_back(entry);
@@ -164,6 +217,10 @@ impl AuditStore {
     pub fn append(&mut self, entry: AuditEntry) -> Result<()> {
         let line = serde_json::to_string(&entry)
             .map_err(|e| AuditStoreError::Malformed(format!("unserializable entry: {e}")))?;
+        let line = match &self.key {
+            Some(key) => Self::seal_line(key, &line)?,
+            None => line,
+        };
         writeln!(self.file, "{line}")?;
         self.file.sync_all()?;
 
@@ -232,6 +289,75 @@ impl AuditStore {
 
     pub fn project_id(&self) -> &str {
         &self.project_id
+    }
+}
+
+/// What one line of the log turned out to be.
+enum LineOutcome {
+    Entry(Box<AuditEntry>),
+    /// Not parseable at all -- a half-written tail from a crash mid-append.
+    Unreadable,
+    /// Sealed, and the key will not open it.
+    WrongKey,
+}
+
+/// The wrapper a sealed entry is written as.
+///
+/// An object rather than bare base64, so the file is still JSONL and anything
+/// reading it line by line still parses. Bare base64 would have discriminated
+/// perfectly well -- it cannot begin with `{` -- and would have broken every
+/// tool that assumes a line is an object.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SealedLine {
+    sealed: String,
+}
+
+impl AuditStore {
+    /// Seal one serialised entry into the line that gets written.
+    fn seal_line(key: &DataKey, line: &str) -> Result<String> {
+        let sealed = key
+            .seal(line.as_bytes())
+            .map_err(|e| AuditStoreError::Malformed(format!("could not seal an entry: {e}")))?;
+        let wrapper = SealedLine {
+            sealed: base64::engine::general_purpose::STANDARD.encode(sealed),
+        };
+        serde_json::to_string(&wrapper)
+            .map_err(|e| AuditStoreError::Malformed(format!("unserializable entry: {e}")))
+    }
+
+    /// Read one line, sealed or clear.
+    ///
+    /// Clear lines are accepted whether or not a key is configured: a log that
+    /// predates encryption is still this project's audit trail, and refusing to
+    /// read it would make turning encryption on destroy the history it is meant
+    /// to protect.
+    fn read_line(line: &str, key: Option<&DataKey>) -> LineOutcome {
+        if let Ok(wrapper) = serde_json::from_str::<SealedLine>(line) {
+            let Some(key) = key else {
+                // Sealed, and this store has no key. Indistinguishable from the
+                // wrong key as far as the reader is concerned, and the same
+                // answer: not a truncation.
+                return LineOutcome::WrongKey;
+            };
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&wrapper.sealed)
+            else {
+                return LineOutcome::Unreadable;
+            };
+            let Ok(plain) = key.open(&bytes) else {
+                return LineOutcome::WrongKey;
+            };
+            return match serde_json::from_slice::<AuditEntry>(&plain) {
+                Ok(entry) => LineOutcome::Entry(Box::new(entry)),
+                // Opened under the key and still not an entry: the key is
+                // right and the content is wrong, which is corruption.
+                Err(_) => LineOutcome::Unreadable,
+            };
+        }
+
+        match serde_json::from_str::<AuditEntry>(line) {
+            Ok(entry) => LineOutcome::Entry(Box::new(entry)),
+            Err(_) => LineOutcome::Unreadable,
+        }
     }
 }
 

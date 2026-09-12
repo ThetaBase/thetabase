@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use theta_core::Value;
-use theta_proto::wire::ChangeDiffWire;
+use theta_proto::wire::{ChangeDiffWire, TxOp};
 use theta_proto::{RequestBody, Response, ResponseBody, StatusCode};
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -240,6 +240,40 @@ impl Scribe {
     /// Results arrive as Arrow IPC and are decoded here rather than at the call
     /// site, so an SDK binding does not have to carry an Arrow dependency to
     /// read a query.
+    /// Several writes as one commit, or none of them.
+    ///
+    /// Unlike [`put_many`], this *is* a transaction: it batches the durability
+    /// boundary and not merely the network. Each operation may carry a
+    /// precondition, and every one is checked against the branch before any
+    /// write is applied — so a refused transaction changes nothing.
+    ///
+    /// Returns `Ok(None)` when a precondition was not met. That is not an
+    /// error: the request was well-formed and the server did what it was asked,
+    /// and a contended transaction is a retry rather than a fault.
+    ///
+    /// [`put_many`]: Self::put_many
+    pub async fn transaction(&self, ops: Vec<TxOp>) -> Result<Option<String>, ScribeError> {
+        {
+            // Invalidated before the call, for the reason `put` gives: an
+            // invalidation that happens after a successful write leaves a crash
+            // window in which the cache serves a value the database no longer
+            // holds. Every key, including those on operations that may turn out
+            // to be refused — invalidating too much costs a read, and
+            // invalidating too little costs correctness.
+            let mut cache = self.cache.lock().await;
+            for op in &ops {
+                cache.invalidate(&op.key);
+            }
+        }
+
+        let response = self.call(RequestBody::Transaction { ops }).await?;
+        match expect_body(response)? {
+            ResponseBody::Transaction { commit_id } => Ok(Some(commit_id)),
+            ResponseBody::PreconditionFailed { .. } => Ok(None),
+            other => Err(ScribeError::Unexpected(format!("{other:?}"))),
+        }
+    }
+
     pub async fn query(&self, sql: &str) -> Result<QueryResult, ScribeError> {
         self.query_with(sql, &[]).await
     }

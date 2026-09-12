@@ -213,6 +213,20 @@ pub enum RequestBody {
     Delete {
         key: String,
     },
+    /// Several writes that land as one commit, or not at all.
+    ///
+    /// A separate request rather than a flag on a batched write, for the same
+    /// reason [`RequestBody::PutIf`] is separate from [`RequestBody::Put`]: a
+    /// server that predates this refuses the call outright instead of applying
+    /// the writes one at a time and leaving the caller believing they were
+    /// atomic. Atomicity lost in transit is worse than atomicity never offered,
+    /// because a partial result looks exactly like a whole one.
+    ///
+    /// Distinct from any batched write that exists for throughput — that kind
+    /// batches the *network*, not the durability boundary.
+    Transaction {
+        ops: Vec<TxOp>,
+    },
     Query(QueryPlanWire),
     Explain(QueryPlanWire),
     /// No impact fields. The server measures what a change would touch against
@@ -379,6 +393,33 @@ impl Request {
                     match expect {
                         Precondition::Absent => e.set_absent(()),
                         Precondition::Version(v) => e.set_version(*v),
+                    }
+                }
+                RequestBody::Transaction { ops } => {
+                    let mut b = body.init_transaction();
+                    let mut list = b.reborrow().init_ops(ops.len() as u32);
+                    for (i, op) in ops.iter().enumerate() {
+                        let mut o = list.reborrow().get(i as u32);
+                        o.set_key(op.key.as_str());
+                        // Written before the action so the borrow of the
+                        // union group ends before the next one begins.
+                        {
+                            let mut e = o.reborrow().get_expect();
+                            match &op.expect {
+                                None => e.set_any(()),
+                                Some(Precondition::Absent) => e.set_absent(()),
+                                Some(Precondition::Version(v)) => e.set_version(*v),
+                            }
+                        }
+                        let mut a = o.get_action();
+                        match &op.action {
+                            TxAction::Put { value_json, ttl } => {
+                                let mut put = a.init_put();
+                                put.set_value(value_json.as_str());
+                                put.set_ttl(*ttl);
+                            }
+                            TxAction::Delete => a.set_delete(()),
+                        }
                     }
                 }
                 RequestBody::Query(plan) => write_plan(body.init_query().init_plan(), plan),
@@ -554,6 +595,47 @@ impl Request {
                     expect,
                 }
             }
+            Which::Transaction(r) => {
+                let r = r.map_err(malformed)?;
+                let mut ops = Vec::new();
+                for o in r.get_ops().map_err(malformed)? {
+                    // An unknown precondition or action must never decode to
+                    // something weaker. Refused, for the reason `putIf` gives.
+                    let expect = match o
+                        .get_expect()
+                        .which()
+                        .map_err(|_| malformed("unknown precondition kind in a transaction"))?
+                    {
+                        generated::transaction_op::expect::Which::Any(()) => None,
+                        generated::transaction_op::expect::Which::Absent(()) => {
+                            Some(Precondition::Absent)
+                        }
+                        generated::transaction_op::expect::Which::Version(v) => {
+                            Some(Precondition::Version(v))
+                        }
+                    };
+                    let action = match o
+                        .get_action()
+                        .which()
+                        .map_err(|_| malformed("unknown action kind in a transaction"))?
+                    {
+                        generated::transaction_op::action::Which::Put(p) => {
+                            let p = p.map_err(malformed)?;
+                            TxAction::Put {
+                                value_json: text(p.get_value())?,
+                                ttl: p.get_ttl(),
+                            }
+                        }
+                        generated::transaction_op::action::Which::Delete(()) => TxAction::Delete,
+                    };
+                    ops.push(TxOp {
+                        key: text(o.get_key())?,
+                        expect,
+                        action,
+                    });
+                }
+                RequestBody::Transaction { ops }
+            }
             Which::Query(r) => RequestBody::Query(read_plan(
                 r.map_err(malformed)?.get_plan().map_err(malformed)?,
             )?),
@@ -689,9 +771,33 @@ pub enum Precondition {
     Version(u64),
 }
 
+/// One operation inside a [`RequestBody::Transaction`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxOp {
+    pub key: String,
+    /// Checked against the branch before *any* operation in the transaction is
+    /// applied, so a transaction that would violate a condition changes
+    /// nothing. This is what lets one call say "record the payment and mark the
+    /// invoice paid, and only if neither has been done already".
+    pub expect: Option<Precondition>,
+    pub action: TxAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxAction {
+    Put { value_json: String, ttl: u64 },
+    Delete,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponseBody {
     Error(WireError),
+    /// One commit id, for the whole transaction. Singular deliberately: a
+    /// transaction that returned an id per operation would be describing
+    /// something that did not happen.
+    Transaction {
+        commit_id: String,
+    },
     Get {
         found: bool,
         value_json: String,
@@ -1019,6 +1125,9 @@ impl Response {
                 ResponseBody::Put { commit_id } => {
                     body.init_put().set_commit_id(commit_id.as_str());
                 }
+                ResponseBody::Transaction { commit_id } => {
+                    body.init_transaction().set_commit_id(commit_id.as_str());
+                }
                 ResponseBody::Delete { commit_id } => {
                     body.init_delete().set_commit_id(commit_id.as_str());
                 }
@@ -1210,6 +1319,9 @@ impl Response {
                     version_id: r.get_version_id(),
                 }
             }
+            Which::Transaction(r) => ResponseBody::Transaction {
+                commit_id: text(r.map_err(malformed)?.get_commit_id())?,
+            },
             Which::Put(r) => ResponseBody::Put {
                 commit_id: text(r.map_err(malformed)?.get_commit_id())?,
             },

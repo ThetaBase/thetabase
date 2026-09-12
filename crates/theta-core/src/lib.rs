@@ -7,6 +7,7 @@
 pub mod address;
 pub mod branch;
 pub mod crdt;
+pub mod encryption;
 pub mod error;
 pub mod hash;
 pub mod index;
@@ -60,3 +61,5 @@ pub use hash::ContentHash;
 pub use index::{encoded_range, IndexBound};
 pub use log::{AgentProvenance, Author, CommitId, CrdtOp, LogEntry, OpType};
 pub use value::{Value, ValueType};
+
+pub use encryption::DataKey;

@@ -37,9 +37,14 @@
 //! the thing it asked the server for. A server can still lie by omission, and no
 //! inclusion proof catches it.
 //!
-//! Completeness proofs need a different structure (an authenticated ordered map,
-//! not a chain) and are not built. Listing that here is deliberate: an inclusion
-//! proof shipped without this sentence would be read as proving more than it
+//! Completeness proofs need a different structure — an authenticated ordered
+//! map, not a chain — and live in [`crate::completeness`]. Use that where the
+//! question is "did the server tell me about everything?"; this module answers
+//! "is what it told me real?", and the two are not interchangeable.
+//!
+//! The sentence that used to sit here said completeness was not built. It is
+//! kept in spirit rather than deleted: an inclusion proof shipped without
+//! somebody reading this paragraph would still be read as proving more than it
 //! does.
 
 use serde::{Deserialize, Serialize};

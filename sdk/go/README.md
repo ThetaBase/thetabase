@@ -1,7 +1,7 @@
 # ThetaBase Go SDK
 
 ```go
-import thetabase "github.com/FelixKramer/ThetaBase/sdk/go"
+import thetabase "github.com/ThetaBase/thetabase/sdk/go"
 ```
 
 Three pieces, the same three every ThetaBase SDK has:

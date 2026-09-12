@@ -51,6 +51,27 @@ pub enum Expect {
     Version { value: u64 },
 }
 
+/// One operation inside a [`HostRequest::Transaction`].
+///
+/// `expect` is optional and absent means unconditional, which is the common
+/// case — a transaction usually carries one condition and several plain writes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostTxOp {
+    pub key: String,
+    #[serde(default)]
+    pub expect: Option<Expect>,
+    #[serde(flatten)]
+    pub action: HostTxAction,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum HostTxAction {
+    Put { value: serde_json::Value },
+    Delete,
+}
+
 /// What the host asked for, before it becomes a wire message.
 ///
 /// JSON rather than a binary ABI: a host has to be able to build this without a
@@ -83,6 +104,16 @@ pub enum HostRequest {
     },
     Delete {
         key: String,
+    },
+    /// Several writes that land as one commit, or not at all.
+    ///
+    /// Added here rather than in each host: this core is the one place the
+    /// protocol is implemented, so a request shape added once reaches every
+    /// binding. A host that built the wire message itself would be a second
+    /// implementation, and the first schema change would leave one of them
+    /// wrong — which is the whole reason the core exists.
+    Transaction {
+        ops: Vec<HostTxOp>,
     },
     Query {
         sql: String,

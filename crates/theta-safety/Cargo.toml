@@ -9,6 +9,8 @@ repository.workspace = true
 publish.workspace = true
 [dependencies]
 theta-core.workspace = true
+# Sealed audit entries are written as base64 inside a JSONL wrapper.
+base64.workspace = true
 # Signing only: policy reaches an instance as bytes signed with the project key.
 # This crate stays free of any network or model client, which the hot-path guard
 # in `thetad/tests/no_llm_on_hot_path.rs` checks.

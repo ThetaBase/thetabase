@@ -6,7 +6,16 @@
 # with. `thetad` needs none of them.
 
 # ---- build -----------------------------------------------------------------
-FROM rust:1.90-bookworm AS build
+# 1.95, where `Cargo.toml` declares an MSRV of 1.90.
+#
+# Not a contradiction and not drift. The MSRV is a promise about the *published*
+# crates, and it holds for them. This image builds with `--features kms`, which
+# pulls the AWS SDK, and those crates require 1.94.1 — so the toolchain that
+# builds the Control Plane has to be newer than the one the engine promises.
+#
+# Pinned rather than `rust:latest`, because a base image that moves on its own
+# turns "the deploy failed" into a question about what changed upstream today.
+FROM rust:1.95-bookworm AS build
 
 # capnp is a build-time dependency of `theta-proto`. It is not in the runtime
 # image because nothing generates schemas at runtime.

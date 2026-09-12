@@ -207,6 +207,36 @@ impl MaterializedView {
         self.versions.get(key).copied()
     }
 
+    /// An authenticated ordered map over every live key.
+    ///
+    /// Built on demand from the fold rather than maintained alongside it. A
+    /// tree kept up to date incrementally is a second representation of the
+    /// same state, and the failure mode when it drifts is proofs that verify
+    /// against a root describing a database that never existed -- worse than
+    /// the cost of rebuilding, which is paid only by callers who ask for a
+    /// proof.
+    ///
+    /// `keys` is already a `BTreeMap`, so the sort the map depends on is the
+    /// order the rows are already in.
+    pub fn ordered_map(&self) -> crate::completeness::OrderedMap {
+        crate::completeness::OrderedMap::build(
+            self.keys
+                .iter()
+                .map(|(key, value)| crate::completeness::MapEntry {
+                    key: key.clone(),
+                    // Serialised the same way `LogEntry::hash` serialises an
+                    // op, so a value hashes identically here and in the chain.
+                    // `Value`'s representation is canonical by construction --
+                    // see the module docs on why bytes and timestamps carry
+                    // their type rather than being inferred from shape.
+                    value: theta_core::hash::ContentHash::of(
+                        &serde_json::to_vec(value).expect("a Value is always serializable"),
+                    ),
+                })
+                .collect(),
+        )
+    }
+
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.keys.get(key)
     }

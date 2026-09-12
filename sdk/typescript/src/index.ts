@@ -1,14 +1,15 @@
 /**
  * ThetaBase TypeScript SDK.
  *
- * STATUS: types and surface only — every method throws, with one exception:
- * `assist.suggestQuery` is live as of M9. It can be, because Assist is a
- * separate HTTP service rather than something reached over the Cap'n Proto
- * transport, so it does not wait on the client work the rest of this file does. The transport exists
- * (ROADMAP M2, and `thetad` serves the full surface), but nothing here is wired
- * to it, because from M6 this file is generated from
- * `crates/theta-proto/schema/theta.capnp` and hand-written bodies would be
- * overwritten. M6 is what delivers a working SDK.
+ * Open one with {@link Theta.open}, giving it a socket and a loaded core:
+ * `node-socket.ts` supplies the first under Node, and another runtime brings
+ * its own.
+ *
+ * Nothing in this file builds a wire message. Requests are handed to the
+ * WebAssembly core as plain objects and come back decoded, which is why seven
+ * SDKs do not mean seven implementations of the protocol — and why a value in
+ * this file never becomes query text, including on the `query` path, where the
+ * core renders the plan.
  *
  * The surface is fixed now because it is the contract an agent writes against,
  * and three properties of it are load-bearing (see docs/specs/02, §3):
@@ -20,6 +21,13 @@
  * 3. `assist` returns a *candidate* plan and never executes. Its output has to
  *    pass back through `query()` like anything else.
  */
+
+import { ProtocolError, ScribeCore, type Socket } from "./scribe.js";
+import { Session, connectionFromEnv } from "./session.js";
+import type { QueryAst } from "./query.js";
+
+export { ProtocolError, ScribeCore, Session, connectionFromEnv };
+export type { Socket };
 
 export type Value =
   | null
@@ -126,33 +134,173 @@ export class CircuitBreakerError extends Error {
   }
 }
 
-const notImplemented = (what: string, milestone: string): never => {
-  throw new Error(`${what} is not implemented yet — lands in ${milestone} (see docs/ROADMAP.md)`);
-};
+/** One operation inside a {@link Theta.transaction}. */
+export type TxOp = {
+  key: string;
+  /** Omitted means unconditional, which is the common case. */
+  expect?: Expect;
+} & ({ action: "put"; value: Value } | { action: "delete" });
+
+/** A precondition on a row's current state. */
+export type Expect = { kind: "absent" } | { kind: "version"; value: number };
+
+/**
+ * Unwrap a response of the expected kind, or throw something a caller can act
+ * on.
+ *
+ * The three named failures are separated deliberately. A gate refusal carries
+ * the diff the caller has to act on and is an *answer*, not a fault; an open
+ * breaker is a limit this project set, not a bad request; and everything else
+ * is an error with a message. Collapsing them into one `Error` would make the
+ * first two unactionable, which is the whole reason the wire distinguishes
+ * them.
+ */
+function expect(response: Record<string, unknown>, kind: string): Record<string, unknown> {
+  if (response.kind === kind) {
+    return (response.value ?? {}) as Record<string, unknown>;
+  }
+
+  if (response.kind === "error") {
+    const value = (response.value ?? {}) as Record<string, unknown>;
+    const message = String(value.message ?? "the server refused the request");
+    const code = String(value.code ?? "");
+
+    if (code === "ConfirmationRequired") {
+      throw new SafetyGateError(message, value.diff as ChangeDiff);
+    }
+    if (code === "BreakerOpen") {
+      throw new CircuitBreakerError(
+        message,
+        Number(value.windowRows ?? 0),
+        Number(value.ceiling ?? 0),
+      );
+    }
+    throw new Error(message);
+  }
+
+  // `raw` is what the core produces for a response this build does not know.
+  // Reported as such rather than as a parse failure, because the cause is a
+  // newer server rather than corrupt data, and the remedy is upgrading.
+  if (response.kind === "raw") {
+    throw new Error(
+      "the server sent a response this SDK does not understand; it is newer " +
+        "than this client. Upgrade the SDK.",
+    );
+  }
+
+  throw new Error(`expected a \`${kind}\` response, got \`${String(response.kind)}\``);
+}
 
 export class Theta {
-  constructor(readonly options: ThetaOptions) {}
+  /**
+   * Not a constructor, because opening a connection is asynchronous and a
+   * constructor that returned an unusable object would make every call site
+   * remember to await something else first.
+   *
+   * `socket` is supplied rather than created here: Node has `node-socket.ts`,
+   * and another runtime brings its own without this file knowing about it.
+   */
+  static async open(options: ThetaOptions, socket: Socket, core: ScribeCore): Promise<Theta> {
+    const session = await Session.open(core, socket, connectionFromEnv(process.env));
+    return new Theta(options, session, core);
+  }
+
+  private constructor(
+    readonly options: ThetaOptions,
+    private readonly session: Session,
+    private readonly core: ScribeCore,
+  ) {}
+
+  /** Release the connection. Further calls will fail. */
+  close(): void {
+    this.session.close();
+  }
 
   /** Point lookup. Hot path: p50 5ms, and no model call, ever. */
-  async get(_key: string): Promise<Value | undefined> {
-    return notImplemented("Theta.get", "M6 (Generated SDKs)");
+  async get(key: string): Promise<Value | undefined> {
+    const response = await this.session.call({ op: "get", key });
+    const value = expect(response, "get");
+    // `found: false` is a successful answer meaning the row is not there, and
+    // it is distinct from a null value that is.
+    return value.found === true ? (value.value as Value) : undefined;
   }
 
-  async put(_key: string, _value: Value): Promise<{ commitId: string }> {
-    return notImplemented("Theta.put", "M6 (Generated SDKs)");
+  async put(key: string, value: Value): Promise<{ commitId: string }> {
+    const response = await this.session.call({ op: "put", key, value });
+    return { commitId: expect(response, "commit").commitId as string };
   }
 
-  async query<T = Value>(_plan: QueryBuilder): Promise<T[]> {
-    return notImplemented("Theta.query", "M6 (Generated SDKs)");
+  async delete(key: string): Promise<{ commitId: string }> {
+    const response = await this.session.call({ op: "delete", key });
+    return { commitId: expect(response, "commit").commitId as string };
+  }
+
+  /**
+   * A write conditional on the row's current state.
+   *
+   * Resolves to `null` when the condition was not met. That is not an error:
+   * the request was well formed and the server did what it was asked, and a
+   * lost-update retry that threw would make an ordinary contended key look like
+   * a fault.
+   */
+  async putIf(key: string, value: Value, expectRow: Expect): Promise<{ commitId: string } | null> {
+    const response = await this.session.call({ op: "putIf", key, value, expect: expectRow });
+    if (response.kind === "preconditionFailed") return null;
+    return { commitId: expect(response, "commit").commitId as string };
+  }
+
+  /**
+   * Several writes that land as one commit, or none of them.
+   *
+   * Unlike sending several `put`s, this batches the durability boundary and not
+   * merely the network. Each operation may carry its own precondition, and all
+   * of them are checked before any write is applied — so a transaction that
+   * would violate one changes nothing.
+   *
+   * Resolves to `null` when a precondition was not met, for the reason
+   * {@link putIf} gives.
+   */
+  async transaction(ops: TxOp[]): Promise<{ commitId: string } | null> {
+    const response = await this.session.call({ op: "transaction", ops });
+    if (response.kind === "preconditionFailed") return null;
+    return { commitId: expect(response, "commit").commitId as string };
+  }
+
+  /**
+   * Run a typed plan.
+   *
+   * Takes a {@link QueryAst} rather than the opaque `QueryBuilder` this file
+   * used to name. `QueryBuilder` was a phantom type with no runtime shape — a
+   * placeholder for a builder that does not exist — and a method taking one
+   * could never have been called. `QueryAst` is what `query.ts` actually
+   * produces.
+   *
+   * The plan is rendered to SQL *by the core*, not here. That is the invariant
+   * this whole SDK is arranged around: a value never becomes query text in
+   * TypeScript, so there is nothing in this file to inject into.
+   */
+  async query<T = Value>(plan: QueryAst): Promise<T[]> {
+    const { sql, params } = this.core.renderQuery(plan);
+    const response = await this.session.call({ op: "query", sql, params });
+    return expect(response, "query").rows as T[];
   }
 
   /** EXPLAIN without executing — what a reviewer reads before approving. */
-  async explain(_plan: QueryBuilder): Promise<Explain> {
-    return notImplemented("Theta.explain", "M6 (Generated SDKs)");
+  async explain(plan: QueryAst): Promise<Explain> {
+    const { sql, params } = this.core.renderQuery(plan);
+    const response = await this.session.call({ op: "explain", sql, params });
+    return expect(response, "explain") as unknown as Explain;
   }
 
   async status(): Promise<ProjectStatus> {
-    return notImplemented("Theta.status", "M6 (Generated SDKs)");
+    const response = await this.session.call({ op: "status" });
+    return expect(response, "status") as unknown as ProjectStatus;
+  }
+
+  /** What is in here, and where it came from. */
+  async describe(): Promise<Record<string, unknown>> {
+    const response = await this.session.call({ op: "describe" });
+    return expect(response, "description");
   }
 
   readonly schema = {
@@ -165,12 +313,16 @@ export class Theta {
      * comes back already saying what the checks found. Landing it still takes
      * an explicit `promote`.
      */
-    propose: async (_change: SchemaChange): Promise<ChangeDiff> =>
-      notImplemented("Theta.schema.propose", "M6 (Generated SDKs)"),
+    propose: async (change: SchemaChange): Promise<ChangeDiff> => {
+      const response = await this.session.call({ op: "proposeSchemaChange", change });
+      return expect(response, "propose") as unknown as ChangeDiff;
+    },
 
     /** A proposal's diff, and what validating it found. */
-    show: async (_changeId: string): Promise<ChangeDiff> =>
-      notImplemented("Theta.schema.show", "M6 (Generated SDKs)"),
+    show: async (changeId: string): Promise<ChangeDiff> => {
+      const response = await this.session.call({ op: "showChange", changeId });
+      return expect(response, "change") as unknown as ChangeDiff;
+    },
 
     /**
      * Confirm a proposed change, by id.
@@ -183,8 +335,10 @@ export class Theta {
      * Confirmation is not a path at all for a change at the shadow gate — that
      * one lands through `promote`.
      */
-    apply: async (_changeId: string, _confirm: boolean): Promise<void> =>
-      notImplemented("Theta.schema.apply", "M6 (Generated SDKs)"),
+    apply: async (changeId: string, confirm: boolean): Promise<void> => {
+      const response = await this.session.call({ op: "applySchemaChange", changeId, confirm });
+      expect(response, "commit");
+    },
 
     /**
      * Re-run validation against a change's shadow branch.
@@ -193,25 +347,45 @@ export class Theta {
      * branch that moved afterwards, which makes the earlier result stale and
      * blocks promotion until it is re-checked.
      */
-    validate: async (_changeId: string): Promise<{ shadowBranch: string; passed: boolean }> =>
-      notImplemented("Theta.schema.validate", "M6 (Generated SDKs)"),
+    validate: async (changeId: string): Promise<{ shadowBranch: string; passed: boolean }> => {
+      const response = await this.session.call({ op: "showChange", changeId });
+      const change = expect(response, "change");
+      return {
+        shadowBranch: String(change.shadowBranchId ?? ""),
+        passed: change.validationPassed === true,
+      };
+    },
 
     /** Merge a validated shadow branch onto its target. Never re-executes. */
-    promote: async (_changeId: string): Promise<void> =>
-      notImplemented("Theta.schema.promote", "M6 (Generated SDKs)"),
+    promote: async (changeId: string): Promise<void> => {
+      const response = await this.session.call({ op: "promoteChange", changeId });
+      expect(response, "commit");
+    },
 
     /** Refuse a change and reclaim its shadow branch. */
-    reject: async (_changeId: string, _reason: string): Promise<void> =>
-      notImplemented("Theta.schema.reject", "M6 (Generated SDKs)"),
+    reject: async (changeId: string, reason: string): Promise<void> => {
+      const response = await this.session.call({ op: "rejectChange", changeId, reason });
+      expect(response, "ok");
+    },
   };
 
   readonly branch = {
-    create: async (_name: string, _from?: string): Promise<string> =>
-      notImplemented("Theta.branch.create", "M6 (Generated SDKs)"),
-    merge: async (_source: string, _into?: string): Promise<MergeResult> =>
-      notImplemented("Theta.branch.merge", "M6 (Generated SDKs)"),
-    discard: async (_name: string): Promise<void> =>
-      notImplemented("Theta.branch.discard", "M6 (Generated SDKs)"),
+    create: async (name: string, from?: string): Promise<string> => {
+      const response = await this.session.call({ op: "createBranch", name, from: from ?? null });
+      return String(expect(response, "branch").branchId);
+    },
+    merge: async (source: string, into?: string): Promise<MergeResult> => {
+      const response = await this.session.call({
+        op: "merge",
+        sourceBranch: source,
+        targetBranch: into ?? null,
+      });
+      return expect(response, "merge") as unknown as MergeResult;
+    },
+    discard: async (name: string): Promise<void> => {
+      const response = await this.session.call({ op: "discardBranch", name });
+      expect(response, "ok");
+    },
   };
 
   readonly assist = {

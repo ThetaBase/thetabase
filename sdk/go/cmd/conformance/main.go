@@ -21,7 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	thetabase "github.com/FelixKramer/ThetaBase/sdk/go"
+	thetabase "github.com/ThetaBase/thetabase/sdk/go"
 )
 
 func main() {

@@ -32,6 +32,7 @@ use crate::shadow::{self, ShadowValidation, Validation};
 use theta_safety::{AuditEntry, CircuitBreaker};
 use theta_storage::anchor::{AnchorError, AnchorLog, AnchorPolicy, AnchorSink};
 use theta_storage::attribution_bytes::{self, StorageAttribution};
+use theta_storage::completeness;
 use theta_storage::inclusion::{self, InclusionProof};
 use theta_storage::merge::{self, MergeOutcome};
 use theta_storage::mergequeue::{EnqueueError, Evicted, MergeQueue, Queued};
@@ -51,6 +52,25 @@ fn describe_precondition(found: bool, actual: u64) -> String {
         true => format!("the row is at version {actual}"),
         false => "the row does not exist".to_string(),
     }
+}
+
+/// One write inside an [`Engine::transaction`].
+///
+/// Deliberately not the wire's `TxOp`. That one carries a JSON string, because
+/// that is what arrived; this one carries a decoded [`Value`], because decoding
+/// is the dispatcher's job and an engine that took JSON would be an engine that
+/// could fail on a parse error halfway through applying a transaction.
+#[derive(Debug, Clone)]
+pub struct TxWrite {
+    pub key: String,
+    pub expect: Option<Precondition>,
+    pub action: TxWriteAction,
+}
+
+#[derive(Debug, Clone)]
+pub enum TxWriteAction {
+    Put { value: Value, ttl: u64 },
+    Delete,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -117,6 +137,37 @@ pub enum EngineError {
         actual: u64,
     },
 
+    /// A transaction with nothing in it.
+    ///
+    /// Refused rather than committed. An empty transaction is a caller bug —
+    /// most often a filter that matched nothing — and committing an empty entry
+    /// while reporting success hides it behind a commit id that looks like work.
+    /// Two rows on one unique index.
+    ///
+    /// Names the row already holding the value, because the caller's next
+    /// question is always *which one* — and answering it is the difference
+    /// between a constraint that helps and one that only refuses.
+    #[error(
+        "`{table}` has a unique index `{index}` on ({columns}), and `{conflicting_key}`          already holds these values"
+    )]
+    UniqueViolation {
+        index: String,
+        table: String,
+        columns: String,
+        conflicting_key: String,
+    },
+
+    #[error("a transaction must contain at least one operation")]
+    EmptyTransaction,
+
+    /// Two operations on one key in a single transaction.
+    ///
+    /// The second operation's precondition would be evaluated against a state
+    /// the first is about to replace, so there is no reading of this that a
+    /// caller would find unsurprising. Refused rather than resolved.
+    #[error("`{key}` appears more than once in one transaction")]
+    DuplicateKeyInTransaction { key: String },
+
     #[error("rejected by the safety layer: {reason}")]
     Gated {
         reason: String,
@@ -147,6 +198,12 @@ pub enum EngineError {
 
     #[error(transparent)]
     Storage(#[from] theta_storage::StorageError),
+
+    // Reading the data key moved from `theta-storage` to `theta-core` when the
+    // Safety Layer needed the same sealing for its audit log, so its failures
+    // arrive as a core error now.
+    #[error(transparent)]
+    Core(#[from] theta_core::CoreError),
 
     /// Refusing to start beats starting without a forensic trail, or with
     /// another project's (`04-threat-model-security.md` §3, §5).
@@ -573,7 +630,22 @@ impl Engine {
         // Opened on this project's own directory, and stamped with this
         // project's id. A directory holding another project's trail fails here
         // rather than interleaving the two.
-        let audit = AuditStore::open(&config.data_dir.join("audit"), &config.project_id)?;
+        // Sealed under the same key as the segments.
+        //
+        // `specs/04` §3 used to record this log as the one thing in the data
+        // directory written in clear: no row values, but change summaries,
+        // table and column names, risk classifications and who proposed what.
+        // A copied volume gave up the shape of the schema and the history of
+        // every gated decision.
+        //
+        // Read from the environment again rather than threaded down from the
+        // WAL's copy: both read the same variable, and a parameter would let
+        // one of them be given a different key without anything noticing.
+        let audit = AuditStore::open_with_key(
+            &config.data_dir.join("audit"),
+            &config.project_id,
+            DataKey::from_env()?,
+        )?;
 
         Ok(Self {
             config,
@@ -836,6 +908,7 @@ impl Engine {
         now_ms: i64,
     ) -> Result<ContentHash> {
         self.check_type(branch, key, &value)?;
+        self.check_unique(branch, key, &value)?;
         self.check_breaker(1, now_ms, &author)?;
         self.append(
             branch,
@@ -892,6 +965,7 @@ impl Engine {
         // the first is actionable and the second sends them looking in the
         // wrong place.
         self.check_type(branch, key, &value)?;
+        self.check_unique(branch, key, &value)?;
         self.check_breaker(1, now_ms, &author)?;
         self.append(
             branch,
@@ -921,6 +995,88 @@ impl Engine {
         let rows = ops.len() as u64;
         self.check_breaker(rows, now_ms, &author)?;
         self.append(branch, OpType::Transaction { ops }, author, now_ms)
+    }
+
+    /// Several writes as one commit, or none of them.
+    ///
+    /// # Why the preconditions are all checked first
+    ///
+    /// Checking and applying per operation would let the first half of a
+    /// transaction land and the second half be refused — which is exactly the
+    /// partial state a transaction exists to prevent, arrived at through the
+    /// mechanism meant to prevent it. So every condition is evaluated against
+    /// the branch as it stands, and only then is anything appended.
+    ///
+    /// That is sound because the engine is owned by a single task and requests
+    /// are handled one at a time: nothing can write between the check and the
+    /// append. The guarantee comes from that serialisation rather than from a
+    /// lock here, and if the engine ever gains concurrent writers this becomes
+    /// wrong — loudly, and in a way no test here would catch, which is why it
+    /// is written down.
+    ///
+    /// # Why two operations on one key are refused
+    ///
+    /// A transaction touching the same key twice has no useful meaning that a
+    /// caller could not express more clearly with one operation, and it has
+    /// several confusing ones: the precondition on the second operation would
+    /// be evaluated against a state that the first operation is about to
+    /// replace. Refused rather than resolved, per "prevent, don't correct".
+    pub fn transaction(
+        &mut self,
+        branch: BranchId,
+        ops: Vec<TxWrite>,
+        author: Author,
+        now_ms: i64,
+    ) -> Result<ContentHash> {
+        if ops.is_empty() {
+            return Err(EngineError::EmptyTransaction);
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for op in &ops {
+            if !seen.insert(op.key.as_str()) {
+                return Err(EngineError::DuplicateKeyInTransaction {
+                    key: op.key.clone(),
+                });
+            }
+        }
+
+        // Every precondition, against the branch as it stands now.
+        for op in &ops {
+            let Some(expect) = op.expect else { continue };
+            let current = self.views.get(&branch).and_then(|v| v.version_of(&op.key));
+            let satisfied = match expect {
+                Precondition::Absent => current.is_none(),
+                Precondition::Version(wanted) => current == Some(wanted),
+            };
+            if !satisfied {
+                return Err(EngineError::PreconditionFailed {
+                    key: op.key.clone(),
+                    found: current.is_some(),
+                    actual: current.unwrap_or(0),
+                });
+            }
+        }
+
+        // Types too, before anything is appended, and for the same reason.
+        for op in &ops {
+            if let TxWriteAction::Put { value, .. } = &op.action {
+                self.check_type(branch, &op.key, value)?;
+                self.check_unique(branch, &op.key, value)?;
+            }
+        }
+
+        self.check_breaker(ops.len() as u64, now_ms, &author)?;
+
+        let entries = ops
+            .into_iter()
+            .map(|op| match op.action {
+                TxWriteAction::Put { value, .. } => OpType::Put { key: op.key, value },
+                TxWriteAction::Delete => OpType::Delete { key: op.key },
+            })
+            .collect();
+
+        self.append(branch, OpType::Transaction { ops: entries }, author, now_ms)
     }
 
     /// Propose a schema change. Always returns a diff and never mutates state —
@@ -1372,6 +1528,7 @@ impl Engine {
         // authorship, never an exemption: a signed drop is still a drop.
         if let OpType::Put { key, value } = &entry.op {
             self.check_type(branch, key, value)?;
+            self.check_unique(branch, key, value)?;
         }
         self.check_breaker(1, now_ms, &entry.author)?;
 
@@ -1682,6 +1839,57 @@ impl Engine {
     /// a time.
     pub fn storage_attribution(&self) -> StorageAttribution {
         attribution_bytes::attribute(&self.views)
+    }
+
+    /// The ordered map for a branch, empty when the branch has no view.
+    ///
+    /// A branch nothing has been written to holds no keys, and a proof over an
+    /// empty map is an honest statement that there is nothing to omit. Erroring
+    /// instead would make "prove this empty branch returned everything" fail,
+    /// which is a question with a correct answer.
+    fn map_of(&self, branch: BranchId) -> theta_storage::completeness::OrderedMap {
+        match self.views.get(&branch) {
+            Some(view) => view.ordered_map(),
+            None => theta_storage::completeness::OrderedMap::build(Vec::new()),
+        }
+    }
+
+    /// The root of the authenticated ordered map over a branch's live keys.
+    ///
+    /// A caller needs this to check a completeness proof, and the caveat is the
+    /// same one inclusion proofs carry: a root the server just handed you
+    /// proves the server is self-consistent and nothing more. It is worth
+    /// something when it arrives from somewhere else -- an anchor, a
+    /// counterparty, a previous session.
+    pub fn map_root(&self, branch: BranchId) -> Result<ContentHash> {
+        Ok(self.map_of(branch).root())
+    }
+
+    /// Prove that every key in `[start, end)` is in the result, and none is
+    /// missing.
+    ///
+    /// This is the thing `inclusion.rs` says it cannot do. An inclusion proof
+    /// shows a row is real; it cannot show the server told you about all of
+    /// them, because catching an omission needs the client to know the key set
+    /// already. The ordered map fixes that by making adjacency provable: the
+    /// proof carries the two keys immediately outside the range, so a hidden
+    /// key would have to occupy an index the client has already accounted for.
+    pub fn prove_range_complete(
+        &self,
+        branch: BranchId,
+        start: &str,
+        end: &str,
+    ) -> Result<completeness::RangeProof> {
+        Ok(self.map_of(branch).prove_range(start, end))
+    }
+
+    /// Prove that `key` is not in a branch.
+    ///
+    /// "Not found" is otherwise the one answer a client has to take on trust --
+    /// an inclusion proof can show what is there and has nothing to say about
+    /// what is not.
+    pub fn prove_absent(&self, branch: BranchId, key: &str) -> Result<completeness::RangeProof> {
+        Ok(self.map_of(branch).prove_absent(key))
     }
 
     /// Prove that an entry is in a branch's history, under its current head.
@@ -2634,6 +2842,87 @@ impl Engine {
                 actual: e.actual.to_string(),
             }
         })
+    }
+
+    /// Refuse a write that would put two rows on one unique index.
+    ///
+    /// # Why this was missing, and why it matters
+    ///
+    /// `IndexDef::unique` has been in the schema since schemas existed and
+    /// nothing on the write path ever read it. A caller who declared a unique
+    /// index got a flag in a document and no enforcement — which is worse than
+    /// having no such flag, because the natural reading of a declared
+    /// constraint is that something is checking it. The failure it permits is
+    /// the one nobody notices until an invoice goes out twice.
+    ///
+    /// # What it costs
+    ///
+    /// A scan of the table per write to a table that has a unique index, and
+    /// nothing at all for a table that has none. That is honest rather than
+    /// clever: there is no index structure behind `IndexDef` yet, so the only
+    /// way to know whether a value is already present is to look.
+    ///
+    /// A table with a unique index and a large number of rows will therefore
+    /// write slowly, and that is the right trade to make in this direction —
+    /// silently accepting a duplicate is not a faster correct answer, it is a
+    /// wrong one. When an index structure exists this becomes a lookup and the
+    /// signature does not change.
+    fn check_unique(&self, branch: BranchId, key: &str, value: &Value) -> Result<()> {
+        let Some(view) = self.views.get(&branch) else {
+            return Ok(());
+        };
+        let Some(address) = RowAddress::parse(key) else {
+            return Ok(());
+        };
+        let Some(table) = view.schema.tables.get(address.table) else {
+            return Ok(());
+        };
+
+        let unique: Vec<&theta_core::schema::IndexDef> =
+            table.indexes.iter().filter(|i| i.unique).collect();
+        if unique.is_empty() {
+            return Ok(());
+        }
+
+        for index in unique {
+            // The tuple this row would occupy. A column the row does not carry
+            // makes the tuple incomplete, and an incomplete tuple collides with
+            // nothing — the same rule SQL uses for a null in a unique index.
+            let Some(incoming) = index
+                .columns
+                .iter()
+                .map(|c| theta_core::address::column(value, address.primary_key, c))
+                .collect::<Option<Vec<Value>>>()
+            else {
+                continue;
+            };
+
+            // `RowSource::scan` rather than the view's own iterator: it is the
+            // one that knows how a table's rows are addressed.
+            for (existing_key, existing) in theta_core::RowSource::scan(view, address.table) {
+                // A row does not collide with itself. This is what makes an
+                // update to an existing row legal rather than a violation of
+                // the constraint it already satisfies.
+                if existing_key.as_str() == address.primary_key {
+                    continue;
+                }
+                let held: Option<Vec<Value>> = index
+                    .columns
+                    .iter()
+                    .map(|c| theta_core::address::column(&existing, &existing_key, c))
+                    .collect();
+                if held.as_ref() == Some(&incoming) {
+                    return Err(EngineError::UniqueViolation {
+                        index: index.name.clone(),
+                        table: address.table.to_string(),
+                        columns: index.columns.join(", "),
+                        conflicting_key: existing_key,
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Write one entry to the trail.

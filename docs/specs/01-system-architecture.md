@@ -133,12 +133,35 @@ This section exists because the two lines above used to say "process/VM
 boundary", and an external review measured that against the code and found
 something narrower.
 
-**As built, two projects on one host are separated by an OS user, not by a
-process/VM sandbox.** Each project runs as its own `thetad` process under its own
+The answer depends on the topology, and this section used to give only one of
+them — the weaker one — as though it were the only one.
+
+**On a shared host, two projects are separated by an OS user, not by a
+process/VM sandbox.** Each runs as its own `thetad` process under its own
 account, and file permissions are what stop one reading another's data
 directory. That is a real boundary and it is not the one the phrase "process/VM
 isolation" leads a reader to expect: it does not survive a local privilege
-escalation, and there is no per-project sandbox, container or VM enforcing it.
+escalation, and nothing sandboxes the process.
+
+**In the deployment the Control Plane actually provisions, they are separated by
+a virtual machine.** `FlyRuntime` creates one app per project *and* environment
+— `instance_app_name(project_id, environment)` — and a Fly Machine is a
+Firecracker microVM with its own kernel and its own memory, hardware-virtualised.
+Two projects provisioned by this code share no address space, no kernel and no
+filesystem. `dev` and `prod` for one project are likewise separate machines.
+
+That is stronger than the shared-host case, and it is stated second rather than
+first because it is a property of *how this is run*. A self-hosted deployment
+putting several projects on one box gets the first paragraph, and should read it
+as the guarantee it has.
+
+`crates/theta-control/tests/deployment_isolation.rs` is the in-repo evidence for
+the part that is checkable: the mapping from project to app is injective over
+the id shapes OAuth actually produces, environments never collide, and a hostile
+project id cannot escape its own name. What it does not and cannot check is
+whether a given operator ran this code — that remains theirs to demonstrate, and
+external review 2 is still what covers it.
+
 The key-injection path that would give each project a distinct data key without
 the host ever holding all of them is **not implemented**.
 

@@ -35,6 +35,32 @@ pub fn to_wire(host: &HostRequest) -> Result<RequestBody, String> {
 
         HostRequest::Delete { key } => RequestBody::Delete { key: key.clone() },
 
+        HostRequest::Transaction { ops } => RequestBody::Transaction {
+            ops: ops
+                .iter()
+                .map(|op| {
+                    Ok(theta_proto::wire::TxOp {
+                        key: op.key.clone(),
+                        expect: op.expect.as_ref().map(|e| match e {
+                            crate::Expect::Absent => theta_proto::wire::Precondition::Absent,
+                            crate::Expect::Version { value } => {
+                                theta_proto::wire::Precondition::Version(*value)
+                            }
+                        }),
+                        action: match &op.action {
+                            crate::HostTxAction::Put { value } => {
+                                theta_proto::wire::TxAction::Put {
+                                    value_json: encode_value(value)?,
+                                    ttl: 0,
+                                }
+                            }
+                            crate::HostTxAction::Delete => theta_proto::wire::TxAction::Delete,
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        },
+
         HostRequest::Query { sql, params } => RequestBody::Query(plan(sql, params)?),
         HostRequest::Explain { sql, params } => RequestBody::Explain(plan(sql, params)?),
 
@@ -180,7 +206,11 @@ pub fn from_wire(response: &Response) -> serde_json::Value {
         ),
         ResponseBody::Put { commit_id }
         | ResponseBody::Delete { commit_id }
-        | ResponseBody::Apply { commit_id } => {
+        | ResponseBody::Apply { commit_id }
+        // One commit id for the whole transaction, reported the same way a
+        // single write is. A host that has to branch on which kind of write it
+        // performed to read a commit id would be doing the core's job.
+        | ResponseBody::Transaction { commit_id } => {
             ("commit", serde_json::json!({ "commitId": commit_id }))
         }
         // Its own kind, not folded into an error. A host narrowing on `kind`
@@ -289,6 +319,80 @@ pub fn from_wire(response: &Response) -> serde_json::Value {
             "error",
             serde_json::json!({ "code": format!("{:?}", e.code), "message": e.message }),
         ),
+        // The call did what was asked and has nothing to report. A host that
+        // could not tell this from an unrecognised response would have to guess
+        // whether its write happened.
+        ResponseBody::Ok => ("ok", serde_json::Value::Null),
+
+        // `describe` — what is in here and where it came from. `llms.txt` calls
+        // this the first thing an agent arriving at an unfamiliar database
+        // asks, and until this arm existed the answer was a debug string.
+        ResponseBody::Description(description) => (
+            "description",
+            serde_json::json!({
+                "tables": description.tables.iter().map(|t| serde_json::json!({
+                    "name": t.name,
+                    "columns": t.columns.iter().map(|c| serde_json::json!({
+                        "name": c.name,
+                        "type": c.ty,
+                        "nullable": c.nullable,
+                        "crdt": c.crdt,
+                        // Whether an agent has written this column, which is
+                        // the question a reviewer asks about a column they do
+                        // not recognise.
+                        "touchedByAgent": c.touched_by_agent,
+                        "examples": c.examples,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                // Reported rather than silently omitted: a caller shown no
+                // examples should be able to tell "there are none" from "you
+                // may not see them".
+                "examplesWithheld": description.examples_withheld,
+                "withheldReason": description.withheld_reason,
+            }),
+        ),
+
+        // A proposal's current state, including what validating it found.
+        ResponseBody::Change(change) => (
+            "change",
+            serde_json::json!({
+                "diff": DiffJson::from(&change.diff),
+                "shadowBranchId": change.shadow_branch_id,
+                "validationPassed": change.validation_passed,
+                "validationSummary": change.validation_summary,
+                "checks": change.checks.iter().map(|c| serde_json::json!({
+                    "name": c.name,
+                    "passed": c.passed,
+                    "detail": c.detail,
+                })).collect::<Vec<_>>(),
+            }),
+        ),
+
+        // What is waiting for a human. A batch carries the strongest gate of
+        // its members, and the reason names which member is responsible — a
+        // reviewer's next question after "this needs validation" is *which one*.
+        ResponseBody::ReviewQueue { batches } => (
+            "reviewQueue",
+            serde_json::json!({
+                "batches": batches.iter().map(|b| serde_json::json!({
+                    "key": b.key,
+                    "gate": b.gate,
+                    "rowsAffected": b.rows_affected,
+                    "cost": b.cost,
+                    "costIfUnbatched": b.cost_if_unbatched,
+                    "reason": b.reason,
+                })).collect::<Vec<_>>(),
+            }),
+        ),
+
+        // **A catch-all, and it hides things.** A response variant added to the
+        // wire without an arm above compiles cleanly and reaches every binding
+        // as `kind: "raw"` with a debug string in it — which is what happened
+        // to `Transaction` before the arm above existed. It is kept because a
+        // host talking to a *newer* server must degrade rather than panic, and
+        // that is a real requirement; but anything added on our side must be
+        // given an arm, and `translate_covers_every_response.rs` is what makes
+        // forgetting fail.
         other => ("raw", serde_json::json!({ "debug": format!("{other:?}") })),
     };
 

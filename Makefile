@@ -1,6 +1,14 @@
 # ThetaBase developer entry points.
 # Every target here is also what CI runs — if it passes locally it passes in CI.
 
+# Windows names an executable with `.exe`, and `go build -o <path>` does not add
+# it for you when the path is explicit. `sdk/conformance/harness.py` looks for
+# the suffixed name, so without this the gate builds one binary and runs
+# another — which it did, silently, for two weeks: a stale `conformance-go.exe`
+# from an earlier session kept passing while every rebuild went to a file
+# nothing executed.
+EXE := $(if $(filter Windows_NT,$(OS)),.exe,)
+
 .PHONY: help build test check fmt lint gates consistency adversarial hotpath wire query sla identity sdk sdk-check wasm conformance archive archive-live eject eject-live durability kms full proto clean
 
 help:
@@ -114,6 +122,7 @@ consistency: ## Gate M1 — convergence, durability, crash recovery, and partiti
 
 adversarial: ## Gate M5 — no unreviewed destructive change reaches a protected branch
 	cargo test -p theta-safety --test adversarial_corpus
+	cargo test -p theta-safety --test audit_encryption
 	cargo test -p thetad --test safety_gate
 	cargo test -p thetad --test shadow_lifecycle
 	cargo test -p thetad --test policy_authority
@@ -182,7 +191,7 @@ conformance: ## Gate M6 — every SDK, a live thetad, identical output
 	$(MAKE) wasm
 	cargo build -q -p thetad --example conformance_server
 	cd sdk/typescript && npm ci --silent && npx tsc -p tsconfig.json
-	cd sdk/go && go build -o ../../target/conformance-go ./cmd/conformance
+	cd sdk/go && go build -o ../../target/conformance-go$(EXE) ./cmd/conformance
 	cargo build -q -p thetabase --example conformance
 	# `build-classpath` writes the resolved jar list where the harness can read
 	# it. Maven knows where its local repository is and what the SDK actually
@@ -196,12 +205,21 @@ conformance: ## Gate M6 — every SDK, a live thetad, identical output
 	# sdk/swift/README.md. macOS and Linux need neither.
 	cd sdk/swift && swift build
 	python3 sdk/conformance/harness.py
+	# The harness drives the protocol core through each host shim. This drives
+	# the `Theta` classes a customer actually holds, which no runner touches —
+	# without it the clients can be wired and broken at the same time, and were.
+	python3 sdk/conformance/client_smoke.py
+	# Adversarial probes. `specs/04` section 7 requires a penetration test of
+	# token minting and scoping before a production launch; this is the
+	# mechanical part of it, not a substitute for the outside review it also asks
+	# for.
+	python3 sdk/conformance/red_team.py
 
 sdk: ## Regenerate the SDK bindings from the wire schema, then typecheck them
 	cargo run -q -p theta-codegen
 	cd sdk/typescript && npm ci --silent && npx tsc -p tsconfig.json --noEmit
 	cd sdk/python && python3 -c "import sys; sys.path.insert(0, 'src'); import thetabase; print('python sdk ok')"
-	cd sdk/go && go build ./... && go build -o ../../target/conformance-go ./cmd/conformance
+	cd sdk/go && go build ./... && go build -o ../../target/conformance-go$(EXE) ./cmd/conformance
 	cd sdk/java && mvn -B -q compile dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
 	# Rust needs no generated file: `theta-proto` already produces the wire
 	# types from the same schema, and a second copy is the drift this target
@@ -260,6 +278,7 @@ platform: ## Gate M9.5 — platform authority is separate, bounded, and recorded
 	# lands in a trail with no route that could edit it.
 	cargo test -p theta-control --test platform_isolation
 	cargo test -p theta-control --lib platform
+	cargo test -p theta-control --test deployment_isolation
 
 ops: ## Gate M10 — the automated half of each failure mode in specs/01 §7
 	# The manual half needs a staging environment and is not met; see

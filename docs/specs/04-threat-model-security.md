@@ -22,13 +22,13 @@ This covers identity/token security, tenant isolation, and — specific to this 
 
 ## 3. Tenant Isolation
 
-- One project = one `thetad` process. **What separates two of them today is an OS user and file permissions, not a process/VM sandbox** — see `01-system-architecture.md` §8.1, which states exactly what is and is not built. The target remains a hard memory/data isolation guarantee with no shared address space between projects regardless of infra tier; it is a target, not a description.
+- One project = one `thetad` process. **What separates two of them depends on the topology: an OS user and file permissions on a shared host, and a Firecracker microVM in the deployment the Control Plane provisions** — one app per project and environment, hardware-virtualised, sharing no kernel — see `01-system-architecture.md` §8.1, which states exactly what is and is not built. The target remains a hard memory/data isolation guarantee with no shared address space between projects regardless of infra tier; it is a target, not a description.
 - **Per-project encryption keys for data at rest** (SEC-2, implemented). Segments and the view snapshot are sealed with XChaCha20-Poly1305 under a 256-bit key belonging to one project; no key is shared across projects, including within an organization. A key opens exactly one project's store and is refused by every other.
   - **Enabled per deployment, not by default.** `thetad` reads the key from `THETA_DATA_KEY`; with no key it writes in clear and says so at startup, at `warn`. Whether a given database is encrypted is answerable from its startup log rather than from this document — which is the point, given what this paragraph used to claim.
   - **Each segment records its own state,** so encryption can be turned on for a store that already holds data: existing segments stay readable, new ones are sealed, and the log rolls to a fresh segment at the boundary rather than mixing the two inside one file.
   - **A key that does not decrypt is reported as a wrong key, never as corruption.** Recovery answers corruption by truncating the log, so conflating the two would mean starting the server with the wrong key silently destroyed the database.
   - **What it protects:** a stolen segment file, a backup or volume snapshot taken without the key, a decommissioned disk, an over-broad replica. **What it does not:** anyone who can read the key alongside the data. Where the key is kept is therefore the whole question, and it is a deployment decision — an orchestrator secret or the value the Control Plane injects at launch keeps it off the volume being protected; a file next to the segments does not. The environment is not itself a theta - it is readable through `/proc/<pid>/environ` to anything running as the same user - and it is chosen because every threat in the list above captures a file on that volume and none of them capture a running process.
-  - **Not covered: `audit.jsonl`.** The Safety Layer's audit log sits in the same directory and is written in clear. It holds change summaries and schema identifiers - table and column names, risk classifications, who proposed what - and no row values. That is a smaller exposure than the log, and it is still an exposure; it is named here rather than left for a reader to discover, because a reader who has just been told "encryption at rest" will not go looking. Sealing it needs the key to reach `theta-safety`, which is the next increment rather than this one.
+  - **Covered as of 2026-09-11: `audit.jsonl`.** The Safety Layer's audit log is sealed entry by entry under the same per-project key, so a copied volume gives up neither rows nor the shape of the schema. It holds change summaries and schema identifiers — table and column names, risk classifications, who proposed what — and used to sit beside the encrypted segments in clear. Sealing is per line rather than per file, so encryption can be switched on for a project that has been running: existing clear entries stay readable and new ones are sealed. The header line stays clear, because it carries the format version and the project id and sealing it would mean needing the key to discover whether you have the right key. **A sealed entry that will not open is reported as a wrong key and never as a truncated tail** — the reader stops at a half-written line, since a crash mid-append leaves one, and taking that path for an undecryptable entry would mean a server started with the wrong key presented a complete-looking audit trail holding nothing. `crates/theta-safety/tests/audit_encryption.rs` covers all of it, including a sweep of every byte in the directory.
   - **Cost:** ~2.6µs to seal a 324-byte record, against a `put` p50 of ~3.6ms that is dominated by an fsync. Encryption does not appear in the latency budget; `crates/theta-storage/tests/seal_cost.rs` keeps that true.
 - Cross-project queries are architecturally impossible, not merely access-controlled — there is no code path in `thetad` that accepts a query spanning two project identifiers.
 
@@ -351,8 +351,18 @@ know what the full key set should be, which is the thing it asked the server for
 A server can still lie by omission and no inclusion proof catches it.
 
 Completeness proofs need a different structure — an authenticated ordered map
-rather than a chain — and are not built. Stated here because a proof shipped
-without this paragraph would be read as proving more than it does.
+rather than a chain — and **are built as of 2026-09-11**, in
+`crates/theta-storage/src/completeness.rs`. A Merkle tree over the live key set
+in sorted order makes adjacency provable: a range proof carries the matched rows
+*and the two keys immediately outside the range*, so an omitted key would have to
+occupy an index the client has already verified. The same structure proves a key
+is absent.
+
+The asymmetry above is therefore closed for queries the ordered map can express —
+ranges over the key space — and remains open for anything else. A proof still
+establishes completeness only *of the map at that root*, so it composes with the
+hash chain and an anchor rather than replacing either: a server that builds the
+map from a doctored fold has produced an honest proof of a dishonest state.
 
 ---
 

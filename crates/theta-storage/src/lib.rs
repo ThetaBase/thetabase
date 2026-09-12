@@ -10,6 +10,7 @@ pub mod anchor;
 pub mod attribution;
 pub mod attribution_bytes;
 pub mod branches;
+pub mod completeness;
 pub mod durable;
 pub mod encryption;
 pub mod error;

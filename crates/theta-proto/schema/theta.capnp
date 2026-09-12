@@ -277,7 +277,54 @@ struct Request {
     # of what has not happened yet, and reading one for the other is how a
     # reviewer concludes the queue is empty because nothing was logged.
     reviewQueue         @24 :ReviewQueueRequest;
+    # Several writes that land as one commit, or not at all (M10.5 follow-on).
+    #
+    # A separate request rather than a flag on a batched put, for the reason
+    # `putIf` is separate from `put`: a server that predates this refuses the
+    # call instead of applying the writes one at a time and leaving the caller
+    # believing they were atomic. Losing atomicity in transit is worse than not
+    # having it, because a partial result looks like a whole one.
+    #
+    # Each operation may carry its own precondition. The server checks every one
+    # of them against the branch before applying any operation, so a transaction
+    # that would violate a condition changes nothing at all. That is what makes
+    # "record the payment and update the invoice, or neither" expressible in one
+    # call.
+    transaction         @25 :TransactionRequest;
   }
+}
+
+struct TransactionRequest {
+  # Applied in order, as a single commit. An empty list is refused rather than
+  # committed: an empty transaction is a caller bug, and committing nothing
+  # while reporting success hides it.
+  ops @0 :List(TransactionOp);
+}
+
+struct TransactionOp {
+  key @0 :Text;
+  # The precondition this operation carries, checked before *any* operation in
+  # the transaction is applied.
+  expect :union {
+    # No condition on this row.
+    any     @1 :Void;
+    # The row must not exist. Create-only — this is how a caller makes a
+    # uniqueness rule the storage layer enforces, by putting the unique tuple
+    # in the key.
+    absent  @2 :Void;
+    # The row must be at exactly this version.
+    version @3 :UInt64;
+  }
+  action :union {
+    put    @4 :PutAction;
+    delete @5 :Void;
+  }
+}
+
+struct PutAction {
+  # Canonical JSON encoding of the value.
+  value @0 :Text;
+  ttl   @1 :UInt64;
 }
 
 struct ReviewQueueRequest {}
@@ -569,8 +616,14 @@ struct Response {
     precondition @18 :PreconditionFailed;
     description  @19 :SchemaDescription;
     reviewQueue  @20 :ReviewQueueResponse;
+    # One commit id for the whole transaction. Singular deliberately: a
+    # response carrying an id per operation would be describing something that
+    # did not happen.
+    transaction @21 :TransactionResponse;
   }
 }
+
+struct TransactionResponse { commitId @0 :Text; }
 
 struct PolicyAccepted {
   # The version the instance now holds, so a caller can poll until every

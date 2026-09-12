@@ -75,6 +75,10 @@ pub use theta_scribe::{CacheStats, QueryResult, StaticToken};
 ///
 /// Re-exported rather than restated. See the crate docs.
 pub use theta_proto::wire;
+/// Re-exported so a caller building a transaction need not depend on the wire
+/// crate directly: `theta.transaction(vec![TxOp { .. }])` should take one use
+/// line, not two.
+pub use theta_proto::wire::{Precondition, TxAction, TxOp};
 
 /// How to reach a project.
 pub type ThetaConfig = ScribeConfig;
@@ -148,6 +152,18 @@ impl Theta {
     }
 
     /// Write several keys in one round trip.
+    /// Several writes as one commit, or none of them.
+    ///
+    /// The difference from [`put_many`] is the one that matters and the one
+    /// that is invisible at the call site: this batches the durability
+    /// boundary, that one batches the network. `Ok(None)` means a precondition
+    /// was not met and nothing was written.
+    ///
+    /// [`put_many`]: Self::put_many
+    pub async fn transaction(&self, ops: Vec<TxOp>) -> Result<Option<String>, Error> {
+        Ok(self.scribe.transaction(ops).await?)
+    }
+
     pub async fn put_many(&self, writes: &[(String, Value)]) -> Result<Vec<String>, Error> {
         Ok(self.scribe.put_many(writes).await?)
     }

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the `theta` CLI.
 #
-#   curl -fsSL https://thetabase.dev/install.sh | sh
+#   curl -fsSL https://thetabase.co/install.sh | sh
 #
 # POSIX sh, not bash: this runs on whatever the machine has, including Alpine
 # containers and minimal CI images where /bin/sh is not bash.
@@ -14,7 +14,7 @@
 
 set -eu
 
-REPO="${THETA_REPO:-FelixKramer/ThetaBase}"
+REPO="${THETA_REPO:-ThetaBase/thetabase}"
 VERSION="${THETA_VERSION:-latest}"
 INSTALL_DIR="${THETA_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -106,17 +106,30 @@ fi
 # ---- install ----------------------------------------------------------------
 
 tar -xzf "$tmp/$archive" -C "$tmp"
-binary="$tmp/theta-${VERSION}-${target}/theta"
-[ -f "$binary" ] || die "the archive did not contain a \`theta\` binary"
+unpacked="$tmp/theta-${VERSION}-${target}"
+[ -f "$unpacked/theta" ] || die "the archive did not contain a \`theta\` binary"
 
 mkdir -p "$INSTALL_DIR"
-# Written to a temporary name and moved into place, so an interrupted install
-# cannot leave a half-written binary where a working one used to be.
-cp "$binary" "$INSTALL_DIR/theta.tmp"
-chmod +x "$INSTALL_DIR/theta.tmp"
-mv "$INSTALL_DIR/theta.tmp" "$INSTALL_DIR/theta"
 
+# Each binary is written to a temporary name and moved into place, so an
+# interrupted install cannot leave a half-written file where a working one
+# used to be.
+install_one() {
+    cp "$unpacked/$1" "$INSTALL_DIR/$1.tmp"
+    chmod +x "$INSTALL_DIR/$1.tmp"
+    mv "$INSTALL_DIR/$1.tmp" "$INSTALL_DIR/$1"
+}
+
+install_one theta
 say "Installed to $INSTALL_DIR/theta"
+
+# `theta-mcp` is how an agent reaches the database, and the documentation tells
+# people to run it. Optional here rather than required, so an older archive
+# that predates it still installs the CLI instead of failing outright.
+if [ -f "$unpacked/theta-mcp" ]; then
+    install_one theta-mcp
+    say "Installed to $INSTALL_DIR/theta-mcp"
+fi
 
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;

@@ -288,6 +288,81 @@ func build(_ spec: JSONValue) throws -> Query {
     return query
 }
 
+/// Drive the client a customer holds, against a live instance.
+///
+/// The conformance suite exercises the protocol core through this binding's
+/// shim. Nothing there touches `Theta`, so without this the Swift client could
+/// be wired and broken at once — which is exactly what the Python and
+/// TypeScript clients turned out to be.
+func smoke(root: URL, address: String, token: String) throws -> Int32 {
+    // The client reads the token from the environment and refuses to take it
+    // as a parameter, so a test has to put it there the way `theta exec` does.
+    // `setenv` is POSIX and absent on Windows, where the ucrt spelling is
+    // `_putenv_s`.
+    #if os(Windows)
+        _ = "THETA_TOKEN".withCString { name in
+            token.withCString { value in _putenv_s(name, value) }
+        }
+    #else
+        setenv("THETA_TOKEN", token, 1)
+    #endif
+
+    let core = try Scribe(
+        path: root.appendingPathComponent(
+            "target/wasm32-unknown-unknown/wasm/theta_scribe_wasm.wasm"))
+
+    let hostPort = address.split(separator: ":")
+    let socket = try TCPSocket(
+        host: String(hostPort[0]), port: UInt16(String(hostPort[1])) ?? 0)
+
+    let theta = try Theta(core: core, socket: socket, project: "conformance")
+    defer { theta.close() }
+
+    var failures: [String] = []
+    func check(_ name: String, _ held: Bool) {
+        print("  \(held ? "ok  " : "FAIL")  \(name)")
+        if !held { failures.append(name) }
+    }
+
+    check("get of an absent row is nil", try theta.get("sw/absent") == nil)
+
+    _ = try theta.put("sw/a", .int(1))
+    check("put then get round-trips", try theta.get("sw/a") == .int(1))
+
+    let created = try theta.putIf("sw/b", .int(2), expect: .absent)
+    check("a create-only write lands when the row is absent", created != nil)
+
+    let again = try theta.putIf("sw/b", .int(3), expect: .absent)
+    check("the same write is refused once the row exists", again == nil)
+    check("the refused write changed nothing", try theta.get("sw/b") == .int(2))
+
+    let committed = try theta.transaction([
+        .put("sw/tx1", .int(10)),
+        .put("sw/tx2", .int(20)),
+    ])
+    check("a transaction commits", committed != nil)
+    check("both of its writes are visible", try theta.get("sw/tx2") == .int(20))
+
+    // The precondition fails on the *second* operation; the first must not
+    // survive it.
+    let refused = try theta.transaction([
+        .put("sw/tx3", .int(30)),
+        .put("sw/b", .int(99), expect: .absent),
+    ])
+    check("a transaction with a failing precondition is refused", refused == nil)
+    check("its other write did not land", try theta.get("sw/tx3") == nil)
+
+    _ = try theta.delete("sw/a")
+    check("delete removes the row", try theta.get("sw/a") == nil)
+
+    if !failures.isEmpty {
+        let report = failures.joined(separator: "; ")
+        FileHandle.standardError.write(report.data(using: .utf8)!)
+        return 1
+    }
+    return 0
+}
+
 func run() throws -> Int32 {
     let arguments = Array(CommandLine.arguments.dropFirst())
     guard arguments.count >= 2 else {
@@ -296,6 +371,15 @@ func run() throws -> Int32 {
     }
 
     let root = try repoRoot()
+
+    // A second mode in this runner rather than a second target: the conformance
+    // build is already in the gate, and a separate executable would be a second
+    // thing to keep built. `--smoke` drives the high-level `Theta` client; the
+    // default drives the protocol core.
+    if arguments.contains("--smoke") {
+        return try smoke(root: root, address: arguments[0], token: arguments[1])
+    }
+
     let suite = try JSONDecoder().decode(
         JSONValue.self,
         from: Data(contentsOf: root.appendingPathComponent("sdk/conformance/cases.json"))

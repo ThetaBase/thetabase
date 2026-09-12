@@ -1,4 +1,4 @@
-module github.com/FelixKramer/ThetaBase/sdk/go
+module github.com/ThetaBase/thetabase/sdk/go
 
 go 1.25.0
 

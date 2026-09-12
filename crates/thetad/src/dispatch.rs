@@ -9,8 +9,8 @@ use theta_core::schema::SchemaChange;
 use theta_core::{Author, BranchId, Value};
 use theta_proto::wire::{
     AuditEntryWire, BranchInfoWire, ChangeDiffWire, ChangeStateWire, ConflictRefWire, GateRuleWire,
-    GateWire, MergeResultWire, MergeStatus, ProjectStatusWire, RemedyWire, ValidationCheckWire,
-    WireError,
+    GateWire, MergeResultWire, MergeStatus, ProjectStatusWire, RemedyWire, TxAction,
+    ValidationCheckWire, WireError,
 };
 use theta_proto::{Request, RequestBody, Response, ResponseBody, StatusCode, PROTOCOL_VERSION};
 use theta_safety::diff::{ChangeDiff, ChangeId, Gate};
@@ -21,7 +21,7 @@ use theta_core::branch::BranchKind;
 use theta_safety::audit::{AuditEntry, RiskLevel};
 use theta_safety::signed::SignedPolicy;
 
-use crate::engine::{Engine, EngineError, Proposal};
+use crate::engine::{Engine, EngineError, Proposal, TxWrite, TxWriteAction};
 use theta_identity::TokenScope;
 
 /// Handle one request against the engine.
@@ -188,6 +188,41 @@ fn handle(
                 // the row was simply not in the state required. Returning an
                 // error here would make an ordinary lost-update retry look like
                 // a fault, and a contended key look like an outage.
+                Err(EngineError::PreconditionFailed { key, found, actual }) => {
+                    Ok(ResponseBody::PreconditionFailed { key, found, actual })
+                }
+                Err(other) => Err(other),
+            }
+        }
+
+        RequestBody::Transaction { ops } => {
+            // Decoded before anything is attempted, so a bad value in the last
+            // operation cannot be discovered after the earlier ones have been
+            // type-checked against the branch. The engine takes decoded values
+            // for this reason.
+            let mut writes = Vec::with_capacity(ops.len());
+            for op in ops {
+                let action = match op.action {
+                    TxAction::Put { value_json, ttl } => TxWriteAction::Put {
+                        value: decode_value(&value_json)?,
+                        ttl,
+                    },
+                    TxAction::Delete => TxWriteAction::Delete,
+                };
+                writes.push(TxWrite {
+                    key: op.key,
+                    expect: op.expect,
+                    action,
+                });
+            }
+
+            match engine.transaction(branch, writes, author, now_ms) {
+                Ok(hash) => Ok(ResponseBody::Transaction {
+                    commit_id: hash.to_hex(),
+                }),
+                // The same treatment `put_if` gives it, and for the same reason:
+                // the request was well-formed and the server did what it was
+                // asked. A contended transaction is a retry, not a fault.
                 Err(EngineError::PreconditionFailed { key, found, actual }) => {
                     Ok(ResponseBody::PreconditionFailed { key, found, actual })
                 }
@@ -609,6 +644,19 @@ fn to_wire_error(err: EngineError) -> WireError {
             (StatusCode::ConfirmationRequired, Some(diff_to_wire(diff)))
         }
         EngineError::BreakerOpen { .. } => (StatusCode::BreakerOpen, None),
+        // Both are the caller's request being malformed in a way no retry of
+        // the same request fixes. `Rejected` says "send a corrected one", which
+        // is exactly the advice: drop the duplicate, or do not send an empty
+        // transaction.
+        EngineError::EmptyTransaction | EngineError::DuplicateKeyInTransaction { .. } => {
+            (StatusCode::Rejected, None)
+        }
+        // The caller sent a well-formed request that the data refuses. Rejected
+        // rather than mapped to the precondition code: a precondition failure
+        // says "retry with what you just read", and retrying this unchanged
+        // fails identically. The message names the row already holding the
+        // value, which is the only thing that helps.
+        EngineError::UniqueViolation { .. } => (StatusCode::Rejected, None),
         // Mapped to the breaker's code rather than to a rejection, and the two
         // genuinely are the same shape of answer: a limit this project set has
         // been reached, nothing is wrong with the request, and retrying it
@@ -644,9 +692,13 @@ fn to_wire_error(err: EngineError) -> WireError {
         // because a future caller of `put_if` that forgets to catch it should
         // get a refusal the client can read, not a panic in the server.
         EngineError::PreconditionFailed { .. } => (StatusCode::Rejected, None),
-        EngineError::NotImplemented { .. } | EngineError::Storage(_) | EngineError::Audit(_) => {
-            (StatusCode::Internal, None)
-        }
+        // `Core` joins these: a key that will not parse or bytes that will not
+        // open are the server's configuration being wrong, not the caller's
+        // request. Nothing the caller changes fixes it.
+        EngineError::NotImplemented { .. }
+        | EngineError::Storage(_)
+        | EngineError::Core(_)
+        | EngineError::Audit(_) => (StatusCode::Internal, None),
     };
     WireError {
         code,

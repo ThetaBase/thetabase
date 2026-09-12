@@ -171,6 +171,49 @@ fn eval(
             filter(rows, predicate, bindings)
         }
 
+        Plan::Join {
+            outer,
+            inner,
+            outer_column,
+            binds,
+        } => {
+            // No budget passed to the outer side. `LIMIT n` over a join does not
+            // mean "n outer rows": an outer row may match nothing and produce
+            // none, or match several and produce many, so stopping the outer
+            // side early would silently truncate a result that had not reached
+            // n yet. The limit above still applies to what comes out.
+            let outer_rows = eval(outer, source, bindings, None)?;
+
+            let mut joined = Vec::new();
+            for row in outer_rows {
+                let Some(key) = row.column(outer_column) else {
+                    // An outer row with no value in the join column matches
+                    // nothing. Skipped rather than matched against null, which
+                    // is what SQL does and what a caller expects.
+                    continue;
+                };
+
+                // The outer row's key, visible to the inner plan under the name
+                // it was written against. A clone per row because the inner
+                // plan may read other parameters too, and a scratch map would
+                // have to put them back afterwards.
+                let mut inner_bindings = bindings.clone();
+                inner_bindings.insert(binds.clone(), key);
+
+                for matched in eval(inner, source, &inner_bindings, None)? {
+                    joined.push(combine(&row, &matched));
+                }
+
+                // Honoured here rather than inside the loop over matches, so a
+                // single outer row's matches are never split across the
+                // boundary — half a row's matches is a result nobody asked for.
+                if budget.is_some_and(|n| joined.len() >= n) {
+                    break;
+                }
+            }
+            Ok(joined)
+        }
+
         Plan::Filter { input, predicate } => {
             // The input gets no budget - how many rows it must produce for the
             // filter to yield `budget` is unknowable without running it - but
@@ -335,6 +378,35 @@ fn matches(row: &Row, predicate: &Predicate, bindings: &Bindings) -> Result<bool
 /// Resolve an expression to a value. This is the only place a parameter becomes
 /// a value, and it produces a [`Value`] — never text that could be spliced into
 /// a query.
+/// Pair an outer row with one inner match.
+///
+/// Fields of both, in one map, inner winning a collision. The primary key is
+/// the outer row's: a joined row is still *about* the outer entity, and using
+/// the inner's would make `LIMIT` and `ORDER BY` above the join behave in ways
+/// a caller could not predict from the query they wrote.
+///
+/// A non-map value on either side is carried under the side's own key rather
+/// than dropped. A row whose value is a bare integer is unusual and not an
+/// error, and losing it silently would be worse than an oddly shaped result.
+fn combine(outer: &Row, inner: &Row) -> Row {
+    let mut fields = match &outer.value {
+        Value::Map(map) => map.clone(),
+        other => BTreeMap::from([("outer".to_string(), other.clone())]),
+    };
+
+    match &inner.value {
+        Value::Map(map) => fields.extend(map.iter().map(|(k, v)| (k.clone(), v.clone()))),
+        other => {
+            fields.insert("inner".to_string(), other.clone());
+        }
+    }
+
+    Row {
+        primary_key: outer.primary_key.clone(),
+        value: Value::Map(fields),
+    }
+}
+
 fn resolve(expr: &Expr, bindings: &Bindings) -> Result<Value, ExecError> {
     match expr {
         Expr::Literal(literal) => Ok(literal.0.clone()),

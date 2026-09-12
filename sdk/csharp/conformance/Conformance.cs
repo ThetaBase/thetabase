@@ -13,6 +13,72 @@ namespace ThetaBase;
 
 public static class Conformance
 {
+    /// <summary>Drive the client a customer holds, against a live instance.</summary>
+    /// <remarks>
+    /// The conformance suite above exercises the protocol core through this
+    /// binding's shim. Nothing there touches <see cref="Theta"/>, so without
+    /// this the C# client could be wired and broken at once — which is exactly
+    /// what the Python and TypeScript clients turned out to be.
+    /// </remarks>
+    private static int Smoke(string root, string address, string token)
+    {
+        Environment.SetEnvironmentVariable("THETA_ADDRESS", address);
+        Environment.SetEnvironmentVariable("THETA_TOKEN", token);
+
+        using var core = Scribe.Load(
+            Path.Combine(root, "target/wasm32-unknown-unknown/wasm/theta_scribe_wasm.wasm"));
+
+        var failures = new List<string>();
+        void Check(string name, bool held, string detail = "")
+        {
+            Console.WriteLine($"  {(held ? "ok  " : "FAIL")}  {name}");
+            if (!held) failures.Add($"{name}: {detail}");
+        }
+
+        using (var theta = Theta.Connect(core, "conformance"))
+        {
+            Check("get of an absent row is null", theta.Get("cs/absent") is null);
+
+            theta.Put("cs/a", 1);
+            Check("put then get round-trips", theta.Get("cs/a")?.GetValue<int>() == 1);
+
+            var created = theta.PutIf("cs/b", 2, new Expect.Absent());
+            Check("a create-only write lands when the row is absent", created is not null);
+
+            var again = theta.PutIf("cs/b", 3, new Expect.Absent());
+            Check("the same write is refused once the row exists", again is null);
+            Check("the refused write changed nothing", theta.Get("cs/b")?.GetValue<int>() == 2);
+
+            var committed = theta.Transaction(new[]
+            {
+                new TxOp { Key = "cs/tx1", Value = 10 },
+                new TxOp { Key = "cs/tx2", Value = 20 },
+            });
+            Check("a transaction commits", committed is not null);
+            Check("both of its writes are visible", theta.Get("cs/tx2")?.GetValue<int>() == 20);
+
+            // The precondition fails on the *second* operation; the first must
+            // not survive it.
+            var refused = theta.Transaction(new[]
+            {
+                new TxOp { Key = "cs/tx3", Value = 30 },
+                new TxOp { Key = "cs/b", Value = 99, Expect = new Expect.Absent() },
+            });
+            Check("a transaction with a failing precondition is refused", refused is null);
+            Check("its other write did not land", theta.Get("cs/tx3") is null);
+
+            theta.Delete("cs/a");
+            Check("delete removes the row", theta.Get("cs/a") is null);
+        }
+
+        if (failures.Count > 0)
+        {
+            Console.Error.WriteLine(string.Join(Environment.NewLine, failures));
+            return 1;
+        }
+        return 0;
+    }
+
     public static int Main(string[] args)
     {
         if (args.Length < 2)
@@ -22,6 +88,16 @@ public static class Conformance
         }
 
         var root = RepoRoot();
+
+        // A second mode in this runner rather than a second project: the
+        // conformance build is already in the gate, and a separate executable
+        // would be a second thing to keep built. `--smoke` drives the
+        // high-level `Theta` client; the default drives the protocol core.
+        if (args.Contains("--smoke"))
+        {
+            return Smoke(root, args[0], args[1]);
+        }
+
         var suite = JsonNode.Parse(File.ReadAllText(Path.Combine(root, "sdk/conformance/cases.json")))!;
 
         using var core = Scribe.Load(

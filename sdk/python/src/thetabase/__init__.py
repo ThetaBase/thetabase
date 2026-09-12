@@ -13,8 +13,12 @@ lockstep with the live schema (docs/specs/02, §3).
 
 from __future__ import annotations
 
+import os
+import socket as _socket
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
+
+from .scribe import Connection, ScribeCore
 
 __all__ = [
     "Theta",
@@ -86,13 +90,49 @@ class CircuitBreakerError(Exception):
         self.ceiling = ceiling
 
 
-def _not_implemented(what: str, milestone: str) -> Any:
-    raise NotImplementedError(
-        f"{what} is not implemented yet — lands in {milestone} (see docs/ROADMAP.md)"
-    )
+def _expect(response: dict[str, Any], kind: str) -> dict[str, Any]:
+    """Unwrap a response of the expected kind, or raise something actionable.
+
+    The three named failures stay distinct. A gate refusal carries the diff the
+    caller has to act on and is an *answer* rather than a fault; an open breaker
+    is a limit this project set rather than a bad request; everything else is an
+    error with a message. Collapsing them into one exception would make the
+    first two unactionable, which is the reason the wire separates them.
+    """
+    if response.get("kind") == kind:
+        return response.get("value") or {}
+
+    if response.get("kind") == "error":
+        value = response.get("value") or {}
+        message = str(value.get("message", "the server refused the request"))
+        code = str(value.get("code", ""))
+        if code == "ConfirmationRequired":
+            raise SafetyGateError(message, value.get("diff"))  # type: ignore[arg-type]
+        if code == "BreakerOpen":
+            raise CircuitBreakerError(
+                message, int(value.get("windowRows", 0)), int(value.get("ceiling", 0))
+            )
+        raise RuntimeError(message)
+
+    # What the core produces for a response this build does not know. Reported
+    # as a version problem rather than a parse failure, because that is what it
+    # is and upgrading is the remedy.
+    if response.get("kind") == "raw":
+        raise RuntimeError(
+            "the server sent a response this SDK does not understand; it is "
+            "newer than this client. Upgrade the SDK."
+        )
+
+    raise RuntimeError(f"expected a `{kind}` response, got `{response.get('kind')}`")
 
 
 class _Schema:
+    def __init__(self, theta: "Theta") -> None:
+        # A back-reference rather than a copy of the connection: `Theta.connect`
+        # attaches the connection after these are built, and a copy taken at
+        # construction would be `None` forever.
+        self._theta = theta
+
     def propose(self, change: dict[str, Any]) -> ChangeDiff:
         """Submit a change. Always returns a diff; never applies anything to the
         target branch.
@@ -102,11 +142,13 @@ class _Schema:
         comes back already saying what the checks found. Landing it still takes
         an explicit :meth:`promote`.
         """
-        return _not_implemented("Theta.schema.propose", "M6 (Generated SDKs)")
+        response = self._theta._call({"op": "proposeSchemaChange", "change": change})
+        return cast(ChangeDiff, _expect(response, "propose"))
 
     def show(self, change_id: str) -> ChangeDiff:
         """A proposal's diff, and what validating it found."""
-        return _not_implemented("Theta.schema.show", "M6 (Generated SDKs)")
+        response = self._theta._call({"op": "showChange", "changeId": change_id})
+        return cast(ChangeDiff, _expect(response, "change"))
 
     def apply(self, change_id: str, confirm: bool) -> None:
         """Confirm a proposed change, by id.
@@ -119,7 +161,10 @@ class _Schema:
         Confirmation is not a path at all for a change at the shadow gate — that
         one lands through :meth:`promote`.
         """
-        return _not_implemented("Theta.schema.apply", "M6 (Generated SDKs)")
+        response = self._theta._call(
+            {"op": "applySchemaChange", "changeId": change_id, "confirm": confirm}
+        )
+        _expect(response, "commit")
 
     def validate(self, change_id: str) -> dict[str, Any]:
         """Re-run validation against a change's shadow branch.
@@ -128,26 +173,44 @@ class _Schema:
         shadow branch that moved afterwards, which makes the earlier result
         stale and blocks promotion until it is re-checked.
         """
-        return _not_implemented("Theta.schema.validate", "M6 (Generated SDKs)")
+        change = _expect(
+            self._theta._call({"op": "showChange", "changeId": change_id}), "change"
+        )
+        return {
+            "shadowBranch": str(change.get("shadowBranchId", "")),
+            "passed": change.get("validationPassed") is True,
+        }
 
     def promote(self, change_id: str) -> None:
         """Merge a validated shadow branch onto its target. Never re-executes."""
-        return _not_implemented("Theta.schema.promote", "M6 (Generated SDKs)")
+        _expect(self._theta._call({"op": "promoteChange", "changeId": change_id}), "commit")
 
     def reject(self, change_id: str, reason: str) -> None:
         """Refuse a change and reclaim its shadow branch."""
-        return _not_implemented("Theta.schema.reject", "M6 (Generated SDKs)")
+        _expect(
+            self._theta._call(
+                {"op": "rejectChange", "changeId": change_id, "reason": reason}
+            ),
+            "ok",
+        )
 
 
 class _Branch:
+    def __init__(self, theta: "Theta") -> None:
+        self._theta = theta
+
     def create(self, name: str, from_: str | None = None) -> str:
-        return _not_implemented("Theta.branch.create", "M6 (Generated SDKs)")
+        response = self._theta._call({"op": "createBranch", "name": name, "from": from_})
+        return str(_expect(response, "branch")["branchId"])
 
     def merge(self, source: str, into: str = "main") -> MergeResult:
-        return _not_implemented("Theta.branch.merge", "M6 (Generated SDKs)")
+        response = self._theta._call(
+            {"op": "merge", "sourceBranch": source, "targetBranch": into}
+        )
+        return cast(MergeResult, _expect(response, "merge"))
 
     def discard(self, name: str) -> None:
-        return _not_implemented("Theta.branch.discard", "M6 (Generated SDKs)")
+        _expect(self._theta._call({"op": "discardBranch", "name": name}), "ok")
 
 
 class _Assist:
@@ -230,23 +293,140 @@ class Theta:
         self.project = project
         self.environment = environment
         self.branch_name = branch
-        self.schema = _Schema()
-        self.branch = _Branch()
+        self._connection: Connection | None = None
+        self._core: ScribeCore | None = None
+        self.schema = _Schema(self)
+        self.branch = _Branch(self)
         self.assist = _Assist(assist_url)
+
+    @classmethod
+    def connect(
+        cls,
+        project: str | None = None,
+        environment: Environment = "dev",
+        branch: str | None = None,
+        assist_url: str | None = None,
+    ) -> "Theta":
+        """Open a connection, taking the address and token from the environment.
+
+        There is deliberately no address or token parameter. ``theta exec``
+        resolves a scoped token for the project and injects both; an SDK that
+        accepted a connection string would undo the property that exists to
+        remove one from application code.
+        """
+        address = os.environ.get("THETA_ADDRESS")
+        token = os.environ.get("THETA_TOKEN")
+        if not address or not token:
+            raise RuntimeError(
+                "THETA_ADDRESS and THETA_TOKEN are not both set. Run this "
+                "process under `theta exec`, which resolves a scoped token for "
+                "the project and injects both."
+            )
+
+        core = ScribeCore()
+        host, _, port = address.rpartition(":")
+        sock = _socket.create_connection((host, int(port)))
+
+        connection = Connection(core, sock)
+        # The handshake, before anything else travels. `thetad` also
+        # re-authorises on every request, so this is the introduction rather
+        # than the whole of the authentication.
+        welcome_body = connection.send_raw(core.encode_hello(token, "thetabase-python"))
+        core.decode_welcome(welcome_body)
+
+        theta = cls(
+            project or os.environ.get("THETA_PROJECT", ""),
+            environment,
+            branch,
+            assist_url,
+        )
+        theta._connection = connection
+        theta._core = core
+        return theta
+
+    def close(self) -> None:
+        """Release the connection. Further calls will fail."""
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
+
+    def __enter__(self) -> "Theta":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+    def _call(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self._connection is None:
+            raise RuntimeError(
+                "this Theta is not connected. Build it with `Theta.connect(...)` "
+                "rather than by calling the constructor, which exists for tests "
+                "that supply their own connection."
+            )
+        return self._connection.call(request)
 
     def get(self, key: str) -> Value:
         """Point lookup. Hot path: p50 5ms, and no model call, ever."""
-        return _not_implemented("Theta.get", "M6 (Generated SDKs)")
+        value = _expect(self._call({"op": "get", "key": key}), "get")
+        # `found: False` is a successful answer meaning the row is not there,
+        # and it is distinct from a null value that is.
+        return value.get("value") if value.get("found") else None
 
     def put(self, key: str, value: Value) -> dict[str, Any]:
-        return _not_implemented("Theta.put", "M6 (Generated SDKs)")
+        response = self._call({"op": "put", "key": key, "value": value})
+        return {"commitId": _expect(response, "commit")["commitId"]}
+
+    def delete(self, key: str) -> dict[str, Any]:
+        response = self._call({"op": "delete", "key": key})
+        return {"commitId": _expect(response, "commit")["commitId"]}
+
+    def put_if(self, key: str, value: Value, expect: dict[str, Any]) -> dict[str, Any] | None:
+        """A write conditional on the row's current state.
+
+        Returns ``None`` when the condition was not met. That is not an error:
+        the request was well formed and the server did what it was asked, and a
+        lost-update retry that raised would make a contended key look like a
+        fault.
+        """
+        response = self._call({"op": "putIf", "key": key, "value": value, "expect": expect})
+        if response.get("kind") == "preconditionFailed":
+            return None
+        return {"commitId": _expect(response, "commit")["commitId"]}
+
+    def transaction(self, ops: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Several writes that land as one commit, or none of them.
+
+        Each operation may carry its own ``expect``, and all of them are checked
+        before any write is applied — so a transaction that would violate one
+        changes nothing. Returns ``None`` when a precondition was not met, for
+        the reason :meth:`put_if` gives.
+        """
+        response = self._call({"op": "transaction", "ops": ops})
+        if response.get("kind") == "preconditionFailed":
+            return None
+        return {"commitId": _expect(response, "commit")["commitId"]}
 
     def query(self, plan: Any) -> list[Value]:
-        return _not_implemented("Theta.query", "M6 (Generated SDKs)")
+        """Run a typed plan.
+
+        The plan is rendered to SQL *by the core*, not here — which is why there
+        is nothing in this file to inject into.
+        """
+        assert self._core is not None
+        rendered = self._core.render_query(plan)
+        response = self._call({"op": "query", **rendered})
+        return _expect(response, "query").get("rows", [])
 
     def explain(self, plan: Any) -> Explain:
         """EXPLAIN without executing — what a reviewer reads before approving."""
-        return _not_implemented("Theta.explain", "M6 (Generated SDKs)")
+        assert self._core is not None
+        rendered = self._core.render_query(plan)
+        response = self._call({"op": "explain", **rendered})
+        return cast(Explain, _expect(response, "explain"))
 
     def status(self) -> ProjectStatus:
-        return _not_implemented("Theta.status", "M6 (Generated SDKs)")
+        return cast(ProjectStatus, _expect(self._call({"op": "status"}), "status"))
+
+    def describe(self) -> dict[str, Any]:
+        """What is in here, and where it came from."""
+        return _expect(self._call({"op": "describe"}), "description")

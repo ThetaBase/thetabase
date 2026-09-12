@@ -94,6 +94,23 @@ fn walk(plan: &Plan, depth: u32, steps: &mut Vec<ExplainStep>, indexes: &mut Vec
             indexes.push(index.clone());
             ("IndexScan", format!("{table} via {index}"), None)
         }
+        // Both sides are walked, not just one, and the inner side is labelled
+        // as the repeated one. A plan showing only the outer branch would hide
+        // the multiplication, which is the single thing a reader of a nested
+        // loop needs to see.
+        Plan::Join {
+            outer,
+            inner,
+            outer_column,
+            binds,
+        } => {
+            walk(inner, depth + 1, steps, indexes);
+            (
+                "IndexNestedLoopJoin",
+                format!("per outer row: {outer_column} -> ${binds}"),
+                Some(outer),
+            )
+        }
         Plan::Filter { input, .. } => ("Filter", String::new(), Some(input)),
         Plan::Project { input, columns } => ("Project", columns.join(", "), Some(input)),
         Plan::Sort { input, by } => (

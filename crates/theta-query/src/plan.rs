@@ -97,6 +97,38 @@ pub enum Plan {
         group_by: Vec<String>,
         aggregates: Vec<Aggregate>,
     },
+    /// Index-nested-loop join: for each row of `outer`, evaluate `inner` with
+    /// the outer row's join column bound, and pair what comes back.
+    ///
+    /// # Why this shape and not a general join
+    ///
+    /// There is no join *algorithm* choice here, and no statistics to make one
+    /// with. `inner` is an ordinary plan — usually a `PointLookup` or an
+    /// `IndexScan` — and it is evaluated once per outer row with `binds` set.
+    /// That is the whole mechanism.
+    ///
+    /// The cost is honest and visible: outer rows multiplied by whatever the
+    /// inner side costs. When the inner is a point lookup that is one lookup
+    /// per outer row; when it is a scan, this is a nested loop over two scans
+    /// and `EXPLAIN` will say so. A planner that could choose a hash join would
+    /// need row counts it does not have, and guessing them is how a query
+    /// optimiser starts being wrong in ways nobody can predict.
+    ///
+    /// # How the sides are combined
+    ///
+    /// The outer row's fields, then the inner row's, into one map. A collision
+    /// is resolved in favour of the inner side and reported by `EXPLAIN` rather
+    /// than silently — two columns of the same name is a caller's modelling
+    /// decision, and quietly dropping one of them is how a join returns data
+    /// that looks right.
+    Join {
+        outer: Box<Plan>,
+        inner: Box<Plan>,
+        /// Column read from each outer row.
+        outer_column: String,
+        /// Parameter name the inner plan reads it as.
+        binds: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +224,12 @@ impl Plan {
             | Plan::Sort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::Aggregate { input, .. } => input.source_table(),
+            // The outer side. A join reads from two tables and this returns
+            // one, which is a genuine limitation of the accessor rather than a
+            // statement about the join — callers use it for routing and
+            // budgeting, and the outer side is the one whose row count drives
+            // both.
+            Plan::Join { outer, .. } => outer.source_table(),
         }
     }
 
@@ -216,6 +254,20 @@ impl Plan {
             | Plan::Sort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::Aggregate { input, .. } => input.collect_params(out),
+            Plan::Join {
+                outer,
+                inner,
+                binds,
+                ..
+            } => {
+                outer.collect_params(out);
+                inner.collect_params(out);
+                // The join's own binding is *supplied* by the join, one row at
+                // a time, so it must not be reported as something the caller
+                // has to bind. Reporting it would make every joined query look
+                // as though it were missing a parameter.
+                out.retain(|(name, _)| name != binds);
+            }
         }
     }
 }
@@ -416,6 +468,22 @@ impl CanonicalEncoder {
                     self.str(agg.column.as_deref().unwrap_or(""));
                     self.str(&agg.alias);
                 }
+            }
+            // Tag 9, appended rather than inserted. These tags are the plan
+            // hash, and the hash has to be identical across releases — renumber
+            // an existing one and every cached plan and every recorded
+            // `planHash` in an audit entry stops matching the plan it names.
+            Plan::Join {
+                outer,
+                inner,
+                outer_column,
+                binds,
+            } => {
+                self.tag(9);
+                self.plan(outer);
+                self.plan(inner);
+                self.str(outer_column);
+                self.str(binds);
             }
         }
     }

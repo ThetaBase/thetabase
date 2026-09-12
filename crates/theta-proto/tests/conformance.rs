@@ -435,6 +435,7 @@ fn request_tag(body: &RequestBody) -> &'static str {
         RequestBody::Crdt { .. } => "crdt",
         RequestBody::ReviewQueue => "reviewQueue",
         RequestBody::SignedWrite { .. } => "signedWrite",
+        RequestBody::Transaction { .. } => "transaction",
     }
 }
 
@@ -443,6 +444,7 @@ fn response_tag(body: &ResponseBody) -> &'static str {
         ResponseBody::Error(_) => "error",
         ResponseBody::Get { .. } => "get",
         ResponseBody::Put { .. } => "put",
+        ResponseBody::Transaction { .. } => "transaction",
         ResponseBody::Delete { .. } => "delete",
         ResponseBody::Query { .. } => "query",
         ResponseBody::Explain { .. } => "explain",

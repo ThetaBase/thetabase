@@ -107,7 +107,7 @@ jobs:
       # a dead link, and harder to notice.
       - name: Build
         run: |
-          cargo build --release --locked --target ${{ matrix.target }}             -p theta-cli -p theta-mcp
+          cargo build --release --locked --target ${{ matrix.build }} -p theta-cli -p theta-mcp
 
       - name: Package (unix)
         if: runner.os != 'Windows'

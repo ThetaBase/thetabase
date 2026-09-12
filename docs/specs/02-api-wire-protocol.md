@@ -9,6 +9,53 @@ ThetaBase v1
 - Wire protocol: Cap'n Proto (zero-copy), framed as `[u32 length][message]`, over a persistent connection between the Scribe (edge SDK) and `thetad`.
 - All requests carry a scoped session token (see Provisioning & Identity Flow Spec) — never a raw project credential the user has seen or copied.
 
+### Encryption in transit
+
+> **Resolution.** This section did not exist. §1 described the framing and the
+> token and said nothing about encryption, so every SDK implemented exactly
+> what was written — a plain socket — and no gate could catch the absence of a
+> property nothing had claimed. The clients could not reach a provisioned
+> instance at all, because a shared address is routed by the name in the TLS
+> handshake; the symptom was a hang. The rule below is what they now implement,
+> and it is here so the next binding cannot make the same choice for the same
+> reason.
+
+**Every connection to a hosted instance is TLS.**
+**A client never falls back to plaintext.**
+A session token authorises reads and writes on a customer's database; putting
+one on an unencrypted socket across the public internet is not a trade-off
+this product offers.
+
+- **The transport is chosen from the address.** Port `443` means TLS. That is
+  the port the platform's proxy listens on and the port the Control Plane hands
+  out. It is the only port in this product's vocabulary that
+  implies a terminator in front of `thetad`, which the engine never is
+  itself. Local and self-hosted plaintext instances are on `7700` and upwards.
+- **`THETA_TLS` overrides it, in both directions.** `1`/`true`/`require`/`yes`
+  forces TLS; `0`/`false`/`off`/`no` forces plaintext. A self-hosted instance
+  behind its own terminating proxy on another port needs the first; a developer
+  tunnelling `443` to a local process needs the second.
+- **The choice is inferred, never carried beside the address.** The address
+  travels through `THETA_ADDRESS` into every SDK and every `theta exec` child. A
+  second variable that had to agree with it would be a second thing to get
+  wrong, and the symptom of disagreement is a *hang* rather than an error: a
+  plaintext frame sent to a TLS listener is read as a ClientHello, found
+  malformed, and discarded.
+- **The host in the address is the SNI name.** A shared address is routed *by*
+  SNI, so getting it wrong does not produce a certificate error — it produces a
+  connection to the wrong instance, or to none. A hosted instance is therefore
+  reachable by hostname and not by IP.
+- **Certificates are verified, chain and name, and there is no option to stop.**
+  No client in this repository exposes a "skip verification" flag. A flag that
+  disables certificate checking is a flag that ends up set in production.
+- **`THETA_TLS_CA` adds a deployment's own CA to the platform roots.** It
+  widens what a client accepts; it does not pin. A deployment with one
+  self-hosted instance and one hosted instance reaches both from one process, so
+  naming a private CA must not displace the public set. A path that cannot be
+  read, or that holds no certificates, is a refusal rather than a warning: an
+  operator who set it has said "trust this CA", and continuing without it would
+  connect under a laxer policy than the one they chose.
+
 ---
 
 ## 2. Core RPC Surface

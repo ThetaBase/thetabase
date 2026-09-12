@@ -218,20 +218,37 @@ public sealed class Scribe : IDisposable
     // ---- transport ----------------------------------------------------------
 
     /// <summary>A framed connection to `thetad`.</summary>
-    public sealed class Connection(Scribe core, Socket socket) : IDisposable
+    /// <remarks>
+    /// Takes a <see cref="Stream"/> rather than a <see cref="Socket"/> so the
+    /// same framing serves a plaintext connection and a TLS one: a provisioned
+    /// instance is reached through Fly's TLS proxy, and <c>SslStream</c> is a
+    /// stream. The socket overload below keeps every existing caller working.
+    /// </remarks>
+    public sealed class Connection(Scribe core, Stream transport) : IDisposable
     {
-        public void Write(byte[] bytes) => socket.Send(bytes);
+        /// <summary>A connection over a bare socket, for a plaintext instance.</summary>
+        public Connection(Scribe core, Socket socket)
+            : this(core, new NetworkStream(socket, ownsSocket: true)) { }
+
+        public void Write(byte[] bytes)
+        {
+            transport.Write(bytes, 0, bytes.Length);
+            // Flushed explicitly. `NetworkStream.Flush` is a no-op, but
+            // `SslStream` buffers -- so without this the handshake frame would
+            // sit in the client and the server would wait for it.
+            transport.Flush();
+        }
 
         /// <summary>Read exactly <paramref name="n"/> bytes, or fail if the peer closes first.</summary>
         public byte[] ReadFully(int n)
         {
             var buffer = new byte[n];
             var read = 0;
-            // A socket delivers whatever arrived, not what was asked for, and a
+            // A stream delivers whatever arrived, not what was asked for, and a
             // short read here would frame the next message wrong.
             while (read < n)
             {
-                var got = socket.Receive(buffer, read, n - read, SocketFlags.None);
+                var got = transport.Read(buffer, read, n - read);
                 if (got <= 0)
                 {
                     throw new IOException("the server closed the connection");
@@ -257,6 +274,6 @@ public sealed class Scribe : IDisposable
             return core.Decode(Frame());
         }
 
-        public void Dispose() => socket.Dispose();
+        public void Dispose() => transport.Dispose();
     }
 }

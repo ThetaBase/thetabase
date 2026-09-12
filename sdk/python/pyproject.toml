@@ -1,6 +1,6 @@
 [project]
 name = "thetabase"
-version = "0.0.1"
+version = "0.0.2"
 description = "ThetaBase Python SDK — the agent-native database client."
 readme = "README.md"
 requires-python = ">=3.10"

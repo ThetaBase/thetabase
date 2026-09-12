@@ -89,8 +89,12 @@ def main(argv)
   suite = JSON.parse(File.read(root.join("sdk/conformance/cases.json")))
   core = ThetaBase::Scribe.load(root.join("target/wasm32-unknown-unknown/wasm/theta_scribe_wasm.wasm"))
 
-  host, port = argv[0].split(":")
-  connection = ThetaBase::Connection.new(core, TCPSocket.new(host, port.to_i))
+  # `ThetaBase.dial` rather than `TCPSocket.new`, so the harness exercises the
+  # transport a customer actually gets -- TLS and SNI included, and the address
+  # parsed the way every other client parses it. Dialling raw TCP here is what
+  # let the SDK ship with no TLS at all: every test passed against a local
+  # plaintext instance, which is the only kind the harness ever started.
+  connection = ThetaBase::Connection.new(core, ThetaBase.dial(argv[0]))
 
   # Handshake first: the server refuses anything else until it has one.
   connection.write(core.encode_hello(argv[1], "conformance-ruby"))

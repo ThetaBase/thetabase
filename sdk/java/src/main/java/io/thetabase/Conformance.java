@@ -31,9 +31,13 @@ public final class Conformance {
         try (Scribe core = Scribe.load(
                 root.resolve("target/wasm32-unknown-unknown/wasm/theta_scribe_wasm.wasm"))) {
 
-            int colon = args[0].lastIndexOf(':');
-            Socket socket = new Socket(args[0].substring(0, colon),
-                    Integer.parseInt(args[0].substring(colon + 1)));
+            // `Dial.open` rather than `new Socket(...)`, so the harness
+            // exercises the transport a customer actually gets -- TLS, SNI and
+            // hostname verification included. Dialling a raw socket here is
+            // what let the SDK ship with no TLS at all: every test passed
+            // against a local plaintext instance, which is the only kind the
+            // harness ever started.
+            Socket socket = Dial.open(args[0]);
 
             ObjectNode report = JSON.createObjectNode();
             ArrayNode results = JSON.createArrayNode();

@@ -314,6 +314,54 @@ impl ControlPlaneClient {
             .map_err(|e| ClientError::Malformed(format!("unrecognised outcome: {e}")))
     }
 
+    /// Delete a project, its instances and its key material.
+    ///
+    /// Irreversible on the server, so nothing here retries. A timeout leaves
+    /// the caller not knowing whether it happened -- which is the honest
+    /// answer, and the endpoint is idempotent, so asking again is safe and is
+    /// what the CLI tells them to do.
+    pub async fn delete_project(
+        &self,
+        identity_token: &str,
+        project_id: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        // Escaped, because a project id contains a `/` by construction
+        // (`org/project`) and an unescaped one would address a different path.
+        let url = format!(
+            "{}/v1/projects/{}",
+            self.base_url,
+            escape_segment(project_id)
+        );
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(identity_token)
+            .send()
+            .await
+            .map_err(|e| ClientError::Unreachable {
+                url: url.clone(),
+                detail: e.to_string(),
+            })?;
+
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            ClientError::Malformed(format!("could not read the response body: {e}"))
+        })?;
+
+        if !status.is_success() {
+            return Err(ClientError::Refused {
+                status: status.as_u16(),
+                message: body
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("the control plane refused to delete the project")
+                    .to_string(),
+            });
+        }
+
+        Ok(body)
+    }
+
     /// Revoke a credential.
     pub async fn revoke(&self, field: &str, id: &str) -> Result<u64, ClientError> {
         let url = format!("{}/v1/revoke", self.base_url);

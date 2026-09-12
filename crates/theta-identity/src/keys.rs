@@ -283,6 +283,25 @@ impl SigningKeyset {
     pub fn projects(&self) -> impl Iterator<Item = &str> {
         self.projects.keys().map(|s| s.as_str())
     }
+
+    /// Drop a project's keys, for a project that is being deleted.
+    ///
+    /// This is what makes deletion final rather than cosmetic. Every session
+    /// token ever minted for the project was signed with these keys, so
+    /// dropping them makes all of them unverifiable at once -- with no
+    /// revocation list to maintain, nothing to compact, and no window in which
+    /// an outstanding token still works.
+    ///
+    /// It also closes the reuse hole. A project id is a name a customer chose
+    /// and may choose again, and a recreated project must not accept tokens
+    /// minted for the one it replaced. Deleting the key material means the
+    /// recreated project generates fresh keys, so it cannot.
+    ///
+    /// Returns what was dropped, so a caller can tell "deleted" from "was
+    /// never there" rather than having to guess.
+    pub fn forget(&mut self, project_id: &str) -> Option<ProjectKeys> {
+        self.projects.remove(project_id)
+    }
 }
 
 /// The public keys one `thetad` instance holds.

@@ -103,15 +103,21 @@ public static class Conformance
         using var core = Scribe.Load(
             Path.Combine(root, "target/wasm32-unknown-unknown/wasm/theta_scribe_wasm.wasm"));
 
-        var colon = args[0].LastIndexOf(':');
-        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        socket.Connect(args[0][..colon], int.Parse(args[0][(colon + 1)..]));
+        // `Theta.Dial` rather than a raw socket, so the harness exercises the
+        // transport a customer actually gets -- TLS, SNI and certificate
+        // verification included. Dialling a bare socket here is part of how the
+        // SDK shipped with no TLS at all: every case passed against a local
+        // plaintext instance, which is the only kind the harness ever started.
+        //
+        // `AddressFamily.InterNetwork` was a second bug hiding in the old line:
+        // it is IPv4-only, so an IPv6-only address could not be reached at all.
+        var transport = Theta.Dial(args[0]);
 
         var report = new JsonObject();
         var results = new JsonArray();
         var queries = new JsonArray();
 
-        using (var connection = new Scribe.Connection(core, socket))
+        using (var connection = new Scribe.Connection(core, transport))
         {
             // Handshake first: the server refuses anything else until it has one.
             connection.Write(core.EncodeHello(args[1], "conformance-csharp"));

@@ -300,18 +300,35 @@ fn the_guard_would_notice_a_client_one_hop_away() {
     // crate's own manifest, so a forbidden crate reached through a dependency
     // passed cleanly while claiming a closure had been walked.
     //
-    // `theta-control` legitimately depends on `reqwest` — it calls OAuth
-    // providers — and nothing on the hot path depends on `theta-control`. That
-    // makes it the honest fixture for "can this walk see past one hop": if the
-    // guard cannot find reqwest from there, it could not find it from anywhere.
+    // `theta-mcp` depends on `theta-cli`, which depends on `reqwest` — it talks
+    // to the Control Plane over HTTP — and nothing on the hot path depends on
+    // either. That makes it the honest fixture for "can this walk see past one
+    // hop": if the guard cannot find reqwest from there, it could not find it
+    // from anywhere.
+    //
+    // The fixture used to be `theta-control`, and that made this test fail in
+    // the *published* repository rather than here. `theta-control` is
+    // proprietary and the public export omits it, so `id_of` found nothing and
+    // the walk panicked with "`theta-control` is not in the workspace" — a red
+    // CI badge on a public repository, for a guard that was working correctly.
+    //
+    // So the fixture has to be a crate that exists in both trees. That is a
+    // real constraint on any test that names a crate: the workspace this runs
+    // against is not always this one.
     let graph = DepGraph::load(&workspace_root());
 
     let path = graph
-        .path_to_forbidden("theta-control")
+        .path_to_forbidden("theta-mcp")
         .expect("the walk found nothing from a crate that really does depend on reqwest");
 
     assert!(path.len() >= 2, "expected a path, got {path:?}");
-    assert_eq!(path.first().map(String::as_str), Some("theta-control"));
+    assert_eq!(path.first().map(String::as_str), Some("theta-mcp"));
+    // And it is genuinely more than one hop, which is the property being
+    // tested. A direct dependency would pass a walk that never recursed.
+    assert!(
+        path.len() >= 3,
+        "the fixture reaches a forbidden crate directly, so this would pass          against a guard that only read one manifest: {path:?}"
+    );
     assert!(
         FORBIDDEN_DEPS.contains(&path.last().expect("an end").as_str()),
         "{path:?}"

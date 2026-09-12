@@ -28,10 +28,22 @@ use theta_identity::oauth::ProviderKind;
 )]
 struct Cli {
     /// Control plane to talk to.
+    ///
+    /// Defaults to the hosted service, because that is what somebody who just
+    /// ran `curl -fsSL https://thetabase.co/install.sh | sh` is trying to
+    /// reach. It used to default to `http://127.0.0.1:8080`, so the first
+    /// command in the documentation answered "Is it running? Start one locally
+    /// with `theta-control --dev-seed`" -- which tells a new customer to run
+    /// the server, and is the correct answer only for somebody developing this
+    /// repository.
+    ///
+    /// `THETA_CONTROL_URL` is how that person gets the old behaviour, and it is
+    /// set in this repository's own dev stack rather than being the default for
+    /// everybody who installs the product.
     #[arg(
         long,
         env = "THETA_CONTROL_URL",
-        default_value = "http://127.0.0.1:8080"
+        default_value = "https://thetabase-control.fly.dev"
     )]
     control_url: String,
 
@@ -48,8 +60,15 @@ enum Command {
     /// Log in once per machine. Opens an OAuth flow in the default browser and
     /// stores a long-lived identity token.
     Login {
-        #[arg(long, default_value = "google")]
-        provider: String,
+        /// Which identity provider to use.
+        ///
+        /// Defaults to the deployment's, not to a guess. `theta login` used to
+        /// default to `google` while the hosted Control Plane offered only
+        /// `github`, so the first command in the documentation failed for every
+        /// new customer -- with an error pointing them at provider settings
+        /// they do not administer, on a deployment that was working correctly.
+        #[arg(long)]
+        provider: Option<String>,
     },
 
     /// Forget the stored identity and every cached context.
@@ -126,6 +145,10 @@ enum Command {
         min_risk: String,
     },
 
+    /// Project operations.
+    #[command(subcommand)]
+    Project(ProjectCommand),
+
     /// Branch operations.
     #[command(subcommand)]
     Branch(BranchCommand),
@@ -180,6 +203,25 @@ enum TokenCommand {
         #[arg(long, value_parser = ["token_id", "session_id", "user_id", "org_id"])]
         kind: String,
         id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProjectCommand {
+    /// Delete a project, its instances and its data. Irreversible.
+    ///
+    /// Here rather than only in the portal because the quota refusal that
+    /// sends most people looking for this arrives in the CLI, and it tells
+    /// them to delete a project. An instruction with no command behind it is
+    /// not an instruction.
+    Delete {
+        /// The project, as `theta contexts` prints it -- or a hint that
+        /// matches exactly one resolved context.
+        project: String,
+
+        /// Skip the confirmation prompt. For scripts, and for nothing else.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -275,7 +317,9 @@ async fn run(cli: Cli) -> Result<ExitCode, String> {
     let client = ControlPlaneClient::new(&cli.control_url);
 
     match cli.command {
-        Command::Login { provider } => login(&store, &client, &cli.control_url, &provider).await,
+        Command::Login { provider } => {
+            login(&store, &client, &cli.control_url, provider.as_deref()).await
+        }
         Command::Logout => {
             store.clear().map_err(|e| e.to_string())?;
             println!(
@@ -300,6 +344,7 @@ async fn run(cli: Cli) -> Result<ExitCode, String> {
             commands::demo(&current_context(&store)?).await?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Project(action) => project(&store, &client, action).await,
         Command::Exec { command } => exec(&store, &command),
         Command::Token { action } => token(&store, &client, action).await,
 
@@ -506,19 +551,51 @@ async fn login(
     store: &CredentialStore,
     client: &ControlPlaneClient,
     control_url: &str,
-    provider: &str,
+    provider: Option<&str>,
 ) -> Result<ExitCode, String> {
-    let kind = ProviderKind::parse(provider)
-        .ok_or_else(|| format!("unknown provider `{provider}` — try `google` or `github`"))?;
-
     // Provider configuration comes from the deployment, not from this machine.
+    // Asked before the name is resolved, so the answer can *be* the default.
     let configured = client.providers().await.map_err(describe_client_error)?;
-    let config = configured
-        .into_iter()
-        .find(|c| c.kind == kind)
-        .ok_or_else(|| {
-            format!("this deployment does not offer {provider} login (see its provider settings)")
-        })?;
+
+    if configured.is_empty() {
+        return Err(
+            "this deployment has no identity provider configured, so there is no \
+             way to log in. That is a deployment setting, not something this \
+             machine can fix."
+                .to_string(),
+        );
+    }
+
+    // Built before `configured` is consumed, so an error can name the choices.
+    let offered = provider_list(&configured);
+
+    let config = match provider {
+        // Named: honour it, and say what is on offer when it is not there.
+        Some(name) => {
+            let kind = ProviderKind::parse(name)
+                .ok_or_else(|| format!("unknown provider `{name}` — this deployment offers {offered}"))?;
+            configured
+                .into_iter()
+                .find(|c| c.kind == kind)
+                .ok_or_else(|| {
+                    format!("this deployment does not offer {name} login — it offers {offered}")
+                })?
+        }
+        // Not named, and exactly one on offer: use it. This is the common case
+        // and it is the one that used to fail.
+        None if configured.len() == 1 => configured.into_iter().next().expect("just checked"),
+        // Several: refuse and list them. Picking one would silently tie a
+        // person's identity to whichever provider happened to come first in the
+        // response, and an identity is not a thing to choose on somebody's
+        // behalf.
+        None => {
+            return Err(format!(
+                "this deployment offers {offered} — choose one with \
+                 `theta login --provider <name>`"
+            ))
+        }
+    };
+    let kind = config.kind;
 
     let (attempt, listener) = login_flow::begin(&config)
         .map_err(|e| format!("could not open a loopback port for the callback: {e}"))?;
@@ -657,6 +734,114 @@ async fn use_context(
     }
 }
 
+/// Delete a project.
+///
+/// The confirmation is a typed name rather than a y/n, for the reason a y/n is
+/// a bad fit: this destroys a database and cannot be undone, and `y` is what
+/// somebody presses to get past a prompt. Typing the project's own name is the
+/// one answer that cannot be given by accident or by habit.
+async fn project(
+    store: &CredentialStore,
+    client: &ControlPlaneClient,
+    action: ProjectCommand,
+) -> Result<ExitCode, String> {
+    let credentials = store.load().map_err(|e| e.to_string())?;
+
+    match action {
+        ProjectCommand::Delete { project, yes } => {
+            // Resolved locally, from contexts this machine has already seen.
+            // Deliberately not through `/v1/resolve`: that provisions what it
+            // cannot find, and a typo in a delete command must not be able to
+            // create a project -- let alone create one and then delete it.
+            let matches: Vec<&CachedContext> = credentials
+                .contexts
+                .iter()
+                .filter(|c| {
+                    c.project_id == project
+                        || c.project_hint == project
+                        || c.project_id
+                            .rsplit('/')
+                            .next()
+                            .is_some_and(|leaf| leaf == project)
+                })
+                .collect();
+
+            let project_id = match matches.as_slice() {
+                [one] => one.project_id.clone(),
+                [] => {
+                    return Err(format!(
+                        "no resolved context for `{project}`. `theta contexts`                          lists what this machine knows; the argument is a                          project id from that list."
+                    ))
+                }
+                // Names that differ only by org. Refusing is the only safe
+                // answer: picking one would delete a database on a coin flip.
+                many => {
+                    let ids: Vec<&str> = many.iter().map(|c| c.project_id.as_str()).collect();
+                    return Err(format!(
+                        "`{project}` matches {} projects: {}. Name one exactly.",
+                        many.len(),
+                        ids.join(", ")
+                    ))
+                }
+            };
+
+            if !yes {
+                println!(
+                    "This deletes `{project_id}` permanently: every instance,                      every branch, every row, and the key that makes them                      readable. There is no undo and no archive."
+                );
+                print!("Type the project id to confirm: ");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+
+                let mut typed = String::new();
+                std::io::stdin()
+                    .read_line(&mut typed)
+                    .map_err(|e| format!("could not read the confirmation: {e}"))?;
+
+                if typed.trim() != project_id {
+                    println!("Not deleted.");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+
+            let outcome = client
+                .delete_project(&credentials.identity_token, &project_id)
+                .await
+                .map_err(describe_client_error)?;
+
+            let released = outcome
+                .get("instancesReleased")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let sessions = outcome
+                .get("sessionsInvalidated")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            println!("Deleted {project_id}.");
+            println!("  instances released:    {released}");
+            println!("  sessions invalidated:  {sessions}");
+            match outcome.get("projectsRemaining").and_then(|v| v.as_u64()) {
+                Some(remaining) => {
+                    println!("  projects you may create: {remaining}")
+                }
+                None => println!("  projects you may create: unlimited on this plan"),
+            }
+
+            // The local context is stale the moment the server answers, and a
+            // stale one is worse than none: `theta status` would dial a
+            // destroyed instance and report it as unreachable rather than as
+            // gone.
+            let mut credentials = credentials;
+            credentials.contexts.retain(|c| c.project_id != project_id);
+            store.save(&credentials).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
 fn contexts(store: &CredentialStore) -> Result<ExitCode, String> {
     let mut credentials = store.load().map_err(|e| e.to_string())?;
     credentials.prune(now_ms());
@@ -765,4 +950,21 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// The providers a deployment offers, for an error message.
+///
+/// Named rather than counted: a person told "this deployment offers 1 provider"
+/// still has to guess which.
+fn provider_list(configured: &[theta_identity::oauth::ProviderConfig]) -> String {
+    let names: Vec<&str> = configured.iter().map(|c| c.kind.as_str()).collect();
+    match names.as_slice() {
+        [] => "no providers".to_string(),
+        [one] => format!("`{one}`"),
+        many => many
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
 }

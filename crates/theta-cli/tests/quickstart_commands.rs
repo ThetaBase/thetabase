@@ -154,3 +154,94 @@ fn the_readme_does_not_promise_the_gate_is_a_wall() {
          reader who takes the gate for a guarantee has been misled by us"
     );
 }
+
+/// Every command in the quickstart has to *parse*, not only exist.
+///
+/// `quickstart` above checks that the README's subcommand names are declared.
+/// It cannot catch a documented invocation the CLI rejects -- and the README
+/// said `theta login github` for months, which is a positional argument on a
+/// command that takes `--provider`. Typing it answers "unexpected argument
+/// 'github' found", in the first ninety seconds, from the page that is also the
+/// launch demo script.
+#[test]
+fn no_quickstart_command_passes_an_argument_the_cli_does_not_accept() {
+    // Which subcommands take a positional argument, read from the CLI's own
+    // declaration. A variant with no fields, or only `#[arg(long)]` fields,
+    // accepts none.
+    let body = CLI
+        .split("enum Command {")
+        .nth(1)
+        .and_then(|rest| rest.split("
+}").next())
+        .expect("main.rs declares a Command enum");
+
+    for line in README.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("theta ") else {
+            continue;
+        };
+        // Only the shell blocks, not prose mentioning a command.
+        let mut words = rest.split_whitespace();
+        let Some(subcommand) = words.next() else {
+            continue;
+        };
+        if !subcommand.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+            continue;
+        }
+
+        // The next word, if it is not a flag or a comment, is a positional.
+        let Some(next) = words.next() else { continue };
+        if next.starts_with('-') || next.starts_with('#') {
+            continue;
+        }
+
+        // Find the variant and see whether it declares a bare field.
+        let variant: String = subcommand
+            .split('-')
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                    None => String::new(),
+                }
+            })
+            .collect();
+
+        let Some(declaration) = body
+            .split(&format!("
+    {variant} {{"))
+            .nth(1)
+            .and_then(|rest| rest.split("
+    },").next())
+        else {
+            // Either a subcommand group (`Plan`, `Branch`, `Schema`) or one
+            // with no block. Those take positionals through their own enums and
+            // are out of scope here.
+            continue;
+        };
+
+        // A positional is a field with no `#[arg(long` above it. Approximated
+        // by asking whether the variant declares any field at all that is not
+        // behind a long flag.
+        let has_positional = declaration
+            .lines()
+            .filter(|l| l.trim_end().ends_with(',') && l.contains(": "))
+            .any(|field| {
+                let name = field.split(':').next().unwrap_or("").trim();
+                !name.starts_with('#')
+                    && !declaration
+                        .split(field)
+                        .next()
+                        .unwrap_or("")
+                        .rsplit("
+")
+                        .take(3)
+                        .any(|prev| prev.contains("#[arg(long"))
+            });
+
+        assert!(
+            has_positional,
+            "the README runs `theta {subcommand} {next}`, and `{variant}`              declares no positional argument -- so the CLI answers \"unexpected              argument\" to a command on its own quickstart"
+        );
+    }
+}

@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 rust-version = "1.90"
 # No licence has been chosen yet, and this field must not pretend otherwise.
@@ -71,6 +71,21 @@ blake3 = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net", "io-util", "signal"] }
+# TLS for the data plane client.
+#
+# A provisioned instance is reached at `<app>.fly.dev:443`, where Fly's proxy
+# terminates TLS -- and a shared IPv4 is routed *by SNI*, so a plaintext
+# connection to that port is not merely unencrypted, it cannot be routed to the
+# right app at all. The client dialled a bare `TcpStream`, which is why no
+# client could talk to anything the Control Plane provisioned.
+#
+# `ring` named explicitly, never a default provider. Two backends end up in this
+# workspace (`reqwest` brings one, `kms` brings aws-lc-rs) and
+# `ClientConfig::builder()` resolves a process-level default that panics when
+# the choice is ambiguous. That panic reached production once already, in
+# `store_postgres.rs`.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 axum = "0.8"

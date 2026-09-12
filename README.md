@@ -74,7 +74,7 @@ Windows: download the `.zip` from
 Then, in about ninety seconds, watch the Safety Layer stop something:
 
 ```sh
-theta login github
+theta login                          # opens the browser; the hosted plane uses GitHub
 theta use acme checkout --create     # resolves, provisions and returns a token
 theta demo                           # seeds a table and rows to work against
 theta schema propose drop-legacy-ref.json

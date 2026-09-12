@@ -1,20 +1,22 @@
 """ThetaBase Python SDK.
 
-STATUS: types and surface only — every method raises. The transport exists
-(ROADMAP M2, and ``thetad`` serves the full surface), but nothing here is wired
-to it, because from M6 this module is generated from
-``crates/theta-proto/schema/theta.capnp`` and hand-written bodies would be
-overwritten. M6 is what delivers a working SDK.
-
 The surface mirrors the TypeScript SDK exactly, because both are generated from
 one protocol definition — that is what keeps an agent's generated code in
 lockstep with the live schema (docs/specs/02, §3).
+
+This docstring said, until now, "types and surface only — every method raises".
+That stopped being true when M6 landed and nobody updated it, and a stale
+status note on the first line of an SDK is worse than none: it is the first
+thing a reader sees, it is load-bearing for whether they use the library at
+all, and one of them sent a build plan down a two-service detour to avoid an
+SDK that had worked for weeks. Every method here calls the wire.
 """
 
 from __future__ import annotations
 
 import os
 import socket as _socket
+import ssl as _ssl
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -38,6 +40,64 @@ __all__ = [
 
 Value = Any
 Environment = Literal["dev", "preview", "prod"]
+
+
+def _wants_tls(address: str) -> bool:
+    """Whether this address should be dialled with TLS.
+
+    ``THETA_TLS`` wins when it is set, so a self-hosted instance behind a
+    terminating proxy on some other port can say so -- and so can a developer
+    tunnelling 443 to a local plaintext process.
+
+    Otherwise: port 443 means TLS. That is the port Fly's proxy listens on and
+    the port the Control Plane hands out, and it is the only port in this
+    product's vocabulary that implies a terminator in front of ``thetad``.
+    Local instances are on 7700 and upwards.
+
+    Inferred from the address rather than carried beside it, deliberately, and
+    identically to the Rust client. The address travels through
+    ``THETA_ADDRESS`` into every SDK; a second variable that had to agree with
+    it would be a second thing to get wrong, and the symptom of getting it
+    wrong is a *hang* rather than an error -- a plaintext frame sent to a TLS
+    listener is not rejected, it is read as a ClientHello, found malformed, and
+    the connection dropped or left open.
+    """
+    override = os.environ.get("THETA_TLS")
+    if override is not None:
+        if override.lower() in ("1", "true", "require", "yes"):
+            return True
+        if override.lower() in ("0", "false", "off", "no"):
+            return False
+
+    _, _, port = address.rpartition(":")
+    return port.strip() == "443"
+
+
+def _tls_context() -> _ssl.SSLContext:
+    """A verifying TLS context, with a deployment's own CA if it named one.
+
+    ``THETA_TLS_CA`` is added to the default roots rather than replacing them.
+    A customer running ``thetad`` behind their own terminating proxy signs with
+    their own CA, and a client that trusts only the public set cannot reach it
+    -- and "turn TLS off instead" is not an answer for a database.
+
+    Said plainly because the difference matters: this widens what the client
+    will accept, it does not pin. A deployment that wants only its own CA to be
+    acceptable is asking for something this does not provide.
+
+    Verification is never disabled and there is no option to disable it. A flag
+    that turns off certificate checking is a flag that ends up set in
+    production, and the whole reason this transport exists is that a session
+    token was about to cross the open internet.
+    """
+    context = _ssl.create_default_context()
+    ca = os.environ.get("THETA_TLS_CA")
+    if ca:
+        # Failures are refusals, never warnings. An operator who set this has
+        # said "trust this CA"; continuing without it would silently connect
+        # under a laxer trust policy than the one they chose.
+        context.load_verify_locations(cafile=ca)
+    return context
 
 
 # The wire types are not restated here.
@@ -325,7 +385,18 @@ class Theta:
 
         core = ScribeCore()
         host, _, port = address.rpartition(":")
-        sock = _socket.create_connection((host, int(port)))
+        sock: _socket.socket = _socket.create_connection((host, int(port)))
+
+        # Nagle off. Every exchange is one small frame and then a wait for the
+        # answer, which is the exact shape Nagle delays.
+        sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+
+        if _wants_tls(address):
+            # ``server_hostname`` is the SNI name, and on a shared address it is
+            # what the proxy routes on -- so getting it wrong does not produce a
+            # certificate error, it produces a connection to the wrong instance
+            # or to none.
+            sock = _tls_context().wrap_socket(sock, server_hostname=host)
 
         connection = Connection(core, sock)
         # The handshake, before anything else travels. `thetad` also

@@ -6,7 +6,10 @@
 // messages, which is why adding a capability to the protocol reaches every
 // binding at once.
 
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Nodes;
 
 namespace ThetaBase;
@@ -111,18 +114,7 @@ public sealed class Theta : IDisposable
             );
         }
 
-        // `LastIndexOf` rather than `IndexOf`: an IPv6 address is full of
-        // colons, and splitting on the first one yields nonsense.
-        var separator = address.LastIndexOf(':');
-        if (separator <= 0 || !int.TryParse(address[(separator + 1)..], out var port))
-        {
-            throw new ProtocolException($"`{address}` is not `host:port`");
-        }
-
-        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-        socket.Connect(address[..separator], port);
-
-        var connection = new Scribe.Connection(core, socket);
+        var connection = new Scribe.Connection(core, Dial(address));
         // The handshake, before anything else travels. `thetad` also
         // re-authorises on every request, so this is the introduction rather
         // than the whole of the authentication.
@@ -134,6 +126,192 @@ public sealed class Theta : IDisposable
             connection,
             project ?? Environment.GetEnvironmentVariable("THETA_PROJECT") ?? ""
         );
+    }
+
+    /// <summary>Open a connection to <paramref name="address"/>, with TLS if the
+    /// address calls for it.</summary>
+    /// <remarks>
+    /// <para>
+    /// Public and separate from <see cref="Connect"/> because anything that
+    /// needs a connection needs this exact behaviour. When the parsing, the
+    /// socket and the TLS decision lived inline in <c>Connect</c>, the
+    /// conformance harness wrote its own and got a plaintext socket — which is
+    /// part of how this SDK shipped with no TLS at all.
+    /// </para>
+    /// <para>
+    /// <paramref name="address"/> is <c>host:port</c>, as <c>THETA_ADDRESS</c>
+    /// carries it.
+    /// </para>
+    /// </remarks>
+    public static Stream Dial(string address)
+    {
+        // `LastIndexOf` rather than `IndexOf`: an IPv6 address is full of
+        // colons, and splitting on the first one yields nonsense.
+        var separator = address.LastIndexOf(':');
+        if (separator <= 0 || !int.TryParse(address[(separator + 1)..], out var port))
+        {
+            throw new ProtocolException(
+                $"`{address}` is not `host:port`. THETA_ADDRESS is set by `theta exec`; "
+                    + "a hand-written value is usually a URL by mistake."
+            );
+        }
+
+        var host = address[..separator].Trim('[', ']');
+
+        // No AddressFamily: the parameterless constructor picks one from the
+        // resolved address, so an IPv6-only host is reachable. Naming
+        // `InterNetwork` here — which the conformance harness did — makes the
+        // client IPv4-only.
+        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        // Nagle off. Every exchange is one small frame and then a wait for the
+        // answer, which is the exact shape Nagle delays.
+        socket.NoDelay = true;
+        socket.Connect(host, port);
+
+        Stream transport = new NetworkStream(socket, ownsSocket: true);
+        return WantsTls(port) ? OpenTls(transport, host) : transport;
+    }
+
+    /// <summary>Whether this address should be dialled with TLS.</summary>
+    /// <remarks>
+    /// <para>
+    /// <c>THETA_TLS</c> wins when it is set, so a self-hosted instance behind a
+    /// terminating proxy on some other port can say so — and so can a developer
+    /// tunnelling 443 to a local plaintext process.
+    /// </para>
+    /// <para>
+    /// Otherwise: port 443 means TLS. That is the port Fly's proxy listens on
+    /// and the port the Control Plane hands out, and it is the only port in this
+    /// product's vocabulary that implies a terminator in front of
+    /// <c>thetad</c>. Local instances are on 7700 and upwards.
+    /// </para>
+    /// <para>
+    /// Inferred from the address rather than carried beside it, deliberately,
+    /// and identically to the Rust, Python and TypeScript clients. The address
+    /// travels through <c>THETA_ADDRESS</c> into every SDK; a second variable
+    /// that had to agree with it would be a second thing to get wrong, and the
+    /// symptom of getting it wrong is a <em>hang</em> rather than an error — a
+    /// plaintext frame sent to a TLS listener is read as a ClientHello, found
+    /// malformed, and discarded.
+    /// </para>
+    /// </remarks>
+    public static bool WantsTls(int port)
+    {
+        var over = Environment.GetEnvironmentVariable("THETA_TLS")?.ToLowerInvariant();
+        if (over is "1" or "true" or "require" or "yes")
+        {
+            return true;
+        }
+        if (over is "0" or "false" or "off" or "no")
+        {
+            return false;
+        }
+        return port == 443;
+    }
+
+    /// <summary>Wrap a connected stream in TLS, verifying the certificate.</summary>
+    /// <remarks>
+    /// <para>
+    /// <c>targetHost</c> is the SNI name, and on a shared address it is what the
+    /// proxy routes on — so getting it wrong does not produce a certificate
+    /// error, it produces a connection to the wrong instance or to none.
+    /// </para>
+    /// <para>
+    /// <c>THETA_TLS_CA</c> adds a deployment's own CA to the platform roots. It
+    /// widens what the client will accept; it does not pin. A customer running
+    /// <c>thetad</c> behind their own terminating proxy signs with their own CA,
+    /// and a client that trusts only the public set cannot reach it — and "turn
+    /// TLS off instead" is not an answer for a database.
+    /// </para>
+    /// <para>
+    /// There is deliberately no way to disable verification. A flag that turns
+    /// off certificate checking is a flag that ends up set in production, and
+    /// the whole reason this transport exists is that a session token was about
+    /// to cross the open internet.
+    /// </para>
+    /// </remarks>
+    private static SslStream OpenTls(Stream transport, string targetHost)
+    {
+        var extra = Environment.GetEnvironmentVariable("THETA_TLS_CA");
+        X509Certificate2Collection? roots = null;
+        if (!string.IsNullOrEmpty(extra))
+        {
+            // A refusal, not a warning. An operator who set this has said
+            // "trust this CA"; continuing without it would silently connect
+            // under a laxer trust policy than the one they chose.
+            try
+            {
+                roots = new X509Certificate2Collection();
+                roots.ImportFromPemFile(extra);
+            }
+            catch (Exception cause)
+            {
+                throw new ProtocolException(
+                    $"THETA_TLS_CA points at `{extra}`, which cannot be read as PEM: {cause.Message}"
+                );
+            }
+            if (roots.Count == 0)
+            {
+                throw new ProtocolException(
+                    $"THETA_TLS_CA `{extra}` contains no certificates. An empty trust "
+                        + "file is almost certainly the wrong file, and ignoring it would "
+                        + "mean connecting under a trust policy nobody chose."
+                );
+            }
+        }
+
+        var ssl = new SslStream(
+            transport,
+            leaveInnerStreamOpen: false,
+            userCertificateValidationCallback: roots is null
+                ? null
+                : (_, certificate, chain, errors) =>
+                {
+                    // Only the "unknown authority" case is reconsidered, and
+                    // only against the CA the operator named. A name mismatch
+                    // or an expired certificate is still a refusal.
+                    if (errors == SslPolicyErrors.None)
+                    {
+                        return true;
+                    }
+                    if (errors != SslPolicyErrors.RemoteCertificateChainErrors)
+                    {
+                        return false;
+                    }
+                    if (certificate is null || chain is null)
+                    {
+                        return false;
+                    }
+
+                    using var rebuilt = new X509Chain();
+                    rebuilt.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                    rebuilt.ChainPolicy.CustomTrustStore.AddRange(roots);
+                    rebuilt.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                    return rebuilt.Build(new X509Certificate2(certificate));
+                }
+        );
+
+        try
+        {
+            ssl.AuthenticateAsClient(
+                new SslClientAuthenticationOptions
+                {
+                    TargetHost = targetHost,
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                }
+            );
+        }
+        catch (Exception cause)
+        {
+            ssl.Dispose();
+            throw new ProtocolException(
+                $"the TLS handshake with `{targetHost}` failed: {cause.Message}. A "
+                    + "provisioned instance presents a publicly signed certificate; a "
+                    + "self-hosted one needs its CA in THETA_TLS_CA."
+            );
+        }
+
+        return ssl;
     }
 
     /// <summary>Operate on a named branch for subsequent calls.</summary>

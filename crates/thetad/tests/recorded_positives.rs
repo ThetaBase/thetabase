@@ -78,6 +78,31 @@ fn code_lines(path: &Path) -> Vec<(usize, String)> {
         .collect()
 }
 
+/// Whether a source file this audit wants to read is present in this tree.
+///
+/// The public repository is a clean export with the proprietary crates removed,
+/// so a test that reads one by path panics there -- on a property that is
+/// defended, in source that is simply not published. This turns that into a
+/// skip that says so.
+///
+/// Deliberately *not* a silent pass. A source-reading audit that reported green
+/// for a file it never opened would be worse than one that failed: the whole
+/// value of SEC-8 is that each recorded property has something checking it, and
+/// a green tick for an unread file is the exact failure this file exists to
+/// prevent one level down.
+fn present(path: &Path) -> bool {
+    if path.exists() {
+        return true;
+    }
+    eprintln!(
+        "skipping: {} is not in this workspace. The proprietary crates are \
+         absent from the public export, so this property is audited in the \
+         private repository only.",
+        path.display()
+    );
+    false
+}
+
 #[test]
 fn the_webhook_signature_is_compared_in_constant_time() {
     // `SECURITY-REVIEW.md`: "constant-time comparison". `verify_slice` is the
@@ -86,6 +111,9 @@ fn the_webhook_signature_is_compared_in_constant_time() {
     // per request to anyone who can time the response.
     let root = workspace_root();
     let path = root.join("crates/theta-control/src/github.rs");
+    if !present(&path) {
+        return;
+    }
     let code = code_lines(&path);
 
     assert!(

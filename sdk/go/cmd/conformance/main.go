@@ -15,8 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,11 +83,15 @@ func run() error {
 		return err
 	}
 
-	conn, err := net.Dial("tcp", address)
+	// `thetabase.Dial` rather than `net.Dial`, so the harness exercises the
+	// transport a customer actually gets -- TLS and SNI included. Dialling raw
+	// TCP here is what let the SDK ship with no TLS at all: every test passed
+	// against a local plaintext instance, which is the only kind the harness
+	// ever started.
+	socket, err := thetabase.Dial(address)
 	if err != nil {
 		return err
 	}
-	socket := &netSocket{conn: conn}
 
 	// Handshake first: the server refuses anything else until it has one.
 	hello, err := core.EncodeHello(token, "conformance-go")
@@ -141,7 +143,7 @@ func run() error {
 	return nil
 }
 
-func exchange(core *thetabase.ScribeCore, socket *netSocket, testCase testCase, request any, requestID uint64) *document {
+func exchange(core *thetabase.ScribeCore, socket thetabase.Socket, testCase testCase, request any, requestID uint64) *document {
 	outcome := newDocument()
 	outcome.set("name", testCase.Name)
 
@@ -327,7 +329,7 @@ func indent(value any) ([]byte, error) {
 
 func firstLine(text string) string { return strings.SplitN(text, "\n", 2)[0] }
 
-func readFrame(core *thetabase.ScribeCore, socket *netSocket) ([]byte, error) {
+func readFrame(core *thetabase.ScribeCore, socket thetabase.Socket) ([]byte, error) {
 	prefix, err := socket.ReadFull(4)
 	if err != nil {
 		return nil, err
@@ -339,27 +341,6 @@ func readFrame(core *thetabase.ScribeCore, socket *netSocket) ([]byte, error) {
 	return socket.ReadFull(int(length))
 }
 
-// netSocket adapts a TCP connection to the SDK's Socket.
-type netSocket struct {
-	conn net.Conn
-}
-
-func (s *netSocket) Write(bytes []byte) error {
-	_, err := s.conn.Write(bytes)
-	return err
-}
-
-func (s *netSocket) ReadFull(n int) ([]byte, error) {
-	out := make([]byte, n)
-	// io.ReadFull rather than Read: a socket delivers whatever arrived, not what
-	// was asked for, and a short read here would frame the next message wrong.
-	if _, err := io.ReadFull(s.conn, out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (s *netSocket) Close() error { return s.conn.Close() }
 
 // repoRoot walks up until it finds the workspace.
 func repoRoot() (string, error) {

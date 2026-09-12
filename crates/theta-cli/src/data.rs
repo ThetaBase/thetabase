@@ -9,9 +9,11 @@
 //! connection pool would only add a way for a stale socket to produce a
 //! confusing error.
 
+use std::sync::Arc;
+
 use theta_proto::frame::{self, LENGTH_PREFIX_BYTES};
 use theta_proto::{Hello, Request, RequestBody, Response, ResponseBody, Welcome, PROTOCOL_VERSION};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[derive(Debug, thiserror::Error)]
@@ -28,8 +30,92 @@ pub enum DataError {
 
 type Result<T> = std::result::Result<T, DataError>;
 
+/// Everything the framing needs from a socket.
+///
+/// A trait object rather than a generic parameter on `DataClient`: the client
+/// is constructed from an address string at runtime, so the choice cannot be
+/// made at a type level by anything that calls it.
+trait Duplex: AsyncRead + AsyncWrite + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Unpin> Duplex for T {}
+
+/// The socket, with or without TLS around it.
+///
+/// Both arms carry the same framing, which is the point of putting the choice
+/// here rather than at every call site.
+enum Transport {
+    /// A local or self-hosted instance, reached in the clear.
+    Plain(TcpStream),
+    /// A provisioned instance, reached through Fly's TLS proxy.
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl Transport {
+    fn stream(&mut self) -> &mut (dyn Duplex + Send) {
+        match self {
+            Transport::Plain(stream) => stream,
+            Transport::Tls(stream) => stream.as_mut(),
+        }
+    }
+}
+
+/// Whether this address should be dialled with TLS.
+///
+/// `THETA_TLS` wins when it is set, so a self-hosted instance behind a
+/// terminating proxy on some other port can say so -- and so can a developer
+/// tunnelling 443 to a local plaintext process.
+///
+/// Otherwise: port 443 means TLS. That is the port Fly's proxy listens on and
+/// the port `FlyRuntime::address` hands out, and it is the only port in this
+/// product's vocabulary that implies a terminator in front of `thetad`. Local
+/// instances are on 7700 and upwards.
+///
+/// Inferred from the address rather than carried beside it, deliberately. The
+/// address travels through `THETA_ADDRESS` into every SDK and every `theta
+/// exec` child; a second variable that had to agree with it would be a second
+/// thing to get wrong, and the symptom of getting it wrong is a hang rather
+/// than an error -- a plaintext frame sent to a TLS listener is not rejected,
+/// it is simply never answered.
+///
+/// Public because it is part of the contract rather than an implementation
+/// detail: a customer deciding how to write `THETA_ADDRESS` for a self-hosted
+/// instance needs to be able to ask what a given address will do, and the
+/// answer being guessable from a doc comment is not the same as being
+/// checkable.
+///
+/// It is also the only way to test the rule at all. Every observable check runs
+/// against an ephemeral port, where both the rule and its negation produce a
+/// plaintext connection -- so a test of `THETA_TLS=0` through `connect` passes
+/// whether or not the override is honoured. I planted the override's removal
+/// and the suite stayed green.
+pub fn wants_tls(address: &str) -> bool {
+    match std::env::var("THETA_TLS").ok().as_deref() {
+        Some("1") | Some("true") | Some("require") | Some("yes") => return true,
+        Some("0") | Some("false") | Some("off") | Some("no") => return false,
+        _ => {}
+    }
+
+    port_of(address) == Some("443")
+}
+
+/// The port, as written. `None` for an address with no colon.
+fn port_of(address: &str) -> Option<&str> {
+    address.rsplit_once(':').map(|(_, port)| port.trim())
+}
+
+/// The host, for SNI and certificate verification.
+///
+/// A shared IPv4 on Fly is routed *by* SNI, so getting this wrong does not
+/// produce a certificate error -- it produces a connection to the wrong app,
+/// or to none.
+fn sni_host(address: &str) -> &str {
+    match address.rsplit_once(':') {
+        Some((host, _)) => host.trim_start_matches('[').trim_end_matches(']'),
+        None => address,
+    }
+}
+
 pub struct DataClient {
-    stream: TcpStream,
+    transport: Transport,
     address: String,
     next_request_id: u64,
     pub project_id: String,
@@ -41,21 +127,31 @@ impl DataClient {
     /// The scoped session token goes in the `Hello`, never a raw project
     /// credential (`04-threat-model-security.md` §2).
     pub async fn connect(address: &str, session_token: &str) -> Result<Self> {
-        let mut stream = TcpStream::connect(address)
+        let tcp = TcpStream::connect(address)
             .await
             .map_err(|e| DataError::Unreachable {
                 address: address.to_string(),
                 detail: e.to_string(),
             })?;
 
+        // Nagle off. Every exchange here is one small frame and then a wait for
+        // the answer, which is the exact shape Nagle delays.
+        let _ = tcp.set_nodelay(true);
+
+        let mut transport = match wants_tls(address) {
+            false => Transport::Plain(tcp),
+            true => Transport::Tls(Box::new(tls_connect(tcp, address).await?)),
+        };
+        let stream = transport.stream();
+
         let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
             session_token: session_token.to_string(),
             client_name: concat!("theta-cli/", env!("CARGO_PKG_VERSION")).to_string(),
         };
-        write_frame(&mut stream, &hello.encode(), address).await?;
+        write_frame(stream, &hello.encode(), address).await?;
 
-        let payload = read_frame(&mut stream, address)
+        let payload = read_frame(stream, address)
             .await?
             .ok_or_else(|| DataError::Unexpected("the instance closed during handshake".into()))?;
 
@@ -68,7 +164,7 @@ impl DataClient {
         };
 
         Ok(Self {
-            stream,
+            transport,
             address: address.to_string(),
             next_request_id: 1,
             project_id: welcome.project_id,
@@ -86,9 +182,10 @@ impl DataClient {
             body,
         };
         let address = self.address.clone();
-        write_frame(&mut self.stream, &request.encode(), &address).await?;
+        let stream = self.transport.stream();
+        write_frame(stream, &request.encode(), &address).await?;
 
-        let payload = read_frame(&mut self.stream, &address)
+        let payload = read_frame(stream, &address)
             .await?
             .ok_or_else(|| DataError::Unexpected("the instance closed mid-call".into()))?;
         let response =
@@ -112,7 +209,105 @@ fn refusal_from(payload: &[u8]) -> DataError {
     }
 }
 
-async fn write_frame(stream: &mut TcpStream, payload: &[u8], address: &str) -> Result<()> {
+/// Wrap a connected socket in TLS.
+///
+/// Roots from `webpki-roots` rather than the platform store. Fly's certificates
+/// are Let's Encrypt, the set is compiled in, and a client whose behaviour
+/// depends on whichever CA bundle a container happens to ship is a client that
+/// works on one machine and not the next.
+///
+/// The crypto provider is named, never defaulted. Two backends reach this
+/// workspace -- `reqwest` brings ring, the `kms` feature brings aws-lc-rs --
+/// and `ClientConfig::builder()` resolves a process-level default that *panics*
+/// when the choice is ambiguous rather than picking one. That exact panic
+/// reached production once already, in `store_postgres.rs`.
+async fn tls_connect(
+    tcp: TcpStream,
+    address: &str,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let unreachable = |detail: String| DataError::Unreachable {
+        address: address.to_string(),
+        detail,
+    };
+
+    let mut roots = tokio_rustls::rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+
+    // A deployment's own CA, added to the public roots rather than replacing
+    // them. A customer running `thetad` behind their own terminating proxy
+    // signs with their own CA, and a client that trusts only the compiled-in
+    // set cannot reach it -- and "turn TLS off instead" is not an answer for a
+    // database.
+    //
+    // Added rather than substituted, and said plainly because the difference
+    // matters: this widens what the client will accept, it does not pin. A
+    // deployment that wants only its own CA to be acceptable is asking for
+    // something this does not provide.
+    //
+    // Failures are refusals, never warnings. An operator who pointed this at
+    // the wrong path has said "trust this CA", and continuing without it would
+    // silently be a different, laxer decision than the one they made.
+    if let Ok(path) = std::env::var("THETA_TLS_CA") {
+        let pem = std::fs::read(&path).map_err(|e| {
+            unreachable(format!(
+                "THETA_TLS_CA points at `{path}`, which cannot be read: {e}"
+            ))
+        })?;
+
+        let mut cursor = std::io::BufReader::new(std::io::Cursor::new(pem));
+        let mut added = 0usize;
+        for entry in rustls_pemfile::certs(&mut cursor) {
+            let cert = entry.map_err(|e| {
+                unreachable(format!("THETA_TLS_CA `{path}` is not readable PEM: {e}"))
+            })?;
+            roots.add(cert).map_err(|e| {
+                unreachable(format!(
+                    "a certificate in THETA_TLS_CA `{path}` was refused: {e}"
+                ))
+            })?;
+            added += 1;
+        }
+
+        if added == 0 {
+            return Err(unreachable(format!(
+                "THETA_TLS_CA `{path}` contains no certificates. An empty \
+                 trust file is almost certainly the wrong file, and ignoring \
+                 it would mean connecting under a trust policy nobody chose."
+            )));
+        }
+    }
+
+    let config = tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| unreachable(format!("tls: {e}")))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+
+    let host = sni_host(address);
+    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| {
+            unreachable(format!(
+                "`{host}` is not a valid TLS server name. A provisioned \
+                 instance is reached by hostname, because a shared address is \
+                 routed by the name in the TLS handshake -- an IP address \
+                 cannot say which instance is wanted."
+            ))
+        })?;
+
+    tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(server_name, tcp)
+        .await
+        .map_err(|e| unreachable(format!("tls handshake: {e}")))
+}
+
+async fn write_frame(
+    stream: &mut (dyn Duplex + Send),
+    payload: &[u8],
+    address: &str,
+) -> Result<()> {
     let framed = frame::frame(payload).map_err(|e| DataError::Unexpected(e.to_string()))?;
     stream
         .write_all(&framed)
@@ -127,7 +322,10 @@ async fn write_frame(stream: &mut TcpStream, payload: &[u8], address: &str) -> R
     })
 }
 
-async fn read_frame(stream: &mut TcpStream, address: &str) -> Result<Option<Vec<u8>>> {
+async fn read_frame(
+    stream: &mut (dyn Duplex + Send),
+    address: &str,
+) -> Result<Option<Vec<u8>>> {
     let unreachable = |e: std::io::Error| DataError::Unreachable {
         address: address.to_string(),
         detail: e.to_string(),

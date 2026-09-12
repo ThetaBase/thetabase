@@ -152,6 +152,82 @@ jobs:
       - run: cargo test -p thetad --test server
       - run: cargo test -p theta-scribe
 
+  # The Apple half of the Swift transport, which no other runner can compile.
+  #
+  # `sdk/swift/Sources/ThetaBase/Dial.swift` has two arms. Windows and Linux
+  # both take the `#else` arm, which refuses to connect and says what would be
+  # needed -- so building the package there proves nothing about the arm that
+  # carries traffic. `Network.framework` is Apple-only, and until this job
+  # existed the TLS path had been written and compiled nowhere.
+  #
+  # That is not a hypothetical risk. Every SDK in this repository shipped with
+  # no TLS at all, and none of it was visible until somebody tried to reach a
+  # hosted instance.
+  swift-apple:
+    name: "Swift SDK on macOS (Network.framework)"
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # The Scribe core. `QueryTests` loads it, so the package's own tests
+      # cannot run without it.
+      - run: make wasm
+      - run: swift build
+        working-directory: sdk/swift
+      # `--build-tests` separately from `test`, so a compile failure in the
+      # Apple-only arm is reported as a build failure rather than as a test
+      # that did not run.
+      - run: swift build --build-tests
+        working-directory: sdk/swift
+      - run: swift test
+        working-directory: sdk/swift
+
+  # The five SDKs CI never built.
+  #
+  # TypeScript and Python were checked; Go, Ruby, Java, C# and Swift were not,
+  # on the reasoning that `make conformance` runs all eight. It does -- and it
+  # needs a .NET SDK, a Maven repository, a Swift toolchain and a Ruby with a
+  # native gem, so it is not what runs on a push. Five bindings were therefore
+  # only ever compiled by whoever last touched them.
+  sdk-compile:
+    name: "SDK compile (Go, Ruby, Java, C#)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - run: go build ./...
+        working-directory: sdk/go
+      - run: go vet ./...
+        working-directory: sdk/go
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      # `-c` on every file, not only the entry point: a syntax error in a file
+      # nothing has required yet is still a broken release.
+      - run: |
+          for f in $(find lib -name '*.rb') conformance.rb; do
+            ruby -c "$f"
+          done
+        working-directory: sdk/ruby
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: mvn -B -q compile
+        working-directory: sdk/java
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0"
+      - run: dotnet build src -warnaserror
+        working-directory: sdk/csharp
+      - run: dotnet build conformance -warnaserror
+        working-directory: sdk/csharp
+
   sdk:
     name: SDK typecheck
     runs-on: ubuntu-latest

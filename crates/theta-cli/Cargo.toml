@@ -31,6 +31,9 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+rustls-pemfile = "2"
 # The credential store, plus one platform backend per OS. Depending on the
 # backends directly (rather than on the `keyring` wrapper) is what lets tests
 # install an in-memory store and exercise the real code path.
@@ -58,5 +61,12 @@ zbus-secret-service-keyring-store = { version = "1", default-features = false, f
 
 [dev-dependencies]
 tempfile.workspace = true
+# A certificate for the TLS transport test.
+#
+# Generated at test time rather than checked in: a private key in the tree is a
+# private key in the tree, and one that exists only to be trusted by a test is
+# exactly the kind that gets copied somewhere it should not be.
+rcgen = "0.13"
+tokio-rustls.workspace = true
 axum.workspace = true
 base64.workspace = true

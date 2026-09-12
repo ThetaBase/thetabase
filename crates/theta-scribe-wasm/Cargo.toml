@@ -12,7 +12,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 theta-proto.workspace = true
-theta-core.workspace = true
+# `default-features = false` drops the AEAD. This core encodes and decodes
+# frames; it never seals anything, and the sealing chain ends at a `getrandom`
+# that will not build for `wasm32-unknown-unknown` at all. See the `encryption`
+# feature in `theta-core`.
+# The path directly rather than `workspace = true`, because cargo ignores
+# `default-features = false` on an inherited workspace dependency -- the
+# workspace declaration wins, and the AEAD came back with it.
+theta-core = { path = "../theta-core", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

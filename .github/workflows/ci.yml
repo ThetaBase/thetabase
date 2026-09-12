@@ -233,6 +233,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The Scribe core, which every SDK sits on. Built here because no job ran
+      # `make wasm` until a macOS one did, and by then it had been broken for a
+      # while: `theta-core` gained an AEAD for the audit log, that reached the
+      # WASM core through a dependency it does not use, and the chain ended at a
+      # `getrandom` that will not compile for `wasm32-unknown-unknown` at all.
+      # A Linux job is the cheapest place to notice.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: make wasm
       - uses: actions/setup-node@v4
         with:
           node-version: 22

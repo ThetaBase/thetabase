@@ -57,11 +57,7 @@ fn declared(relative: &str, prefix: &str) -> String {
     let found = text
         .split(prefix)
         .nth(1)
-        .and_then(|tail| {
-            tail.split(|c: char| c == '"' || c == '<')
-                .next()
-                .map(str::trim)
-        })
+        .and_then(|tail| tail.split(['"', '<']).next().map(str::trim))
         .unwrap_or_else(|| {
             panic!("{relative} has no `{prefix}…` — the manifest's shape has changed")
         });

@@ -322,10 +322,7 @@ async fn write_frame(
     })
 }
 
-async fn read_frame(
-    stream: &mut (dyn Duplex + Send),
-    address: &str,
-) -> Result<Option<Vec<u8>>> {
+async fn read_frame(stream: &mut (dyn Duplex + Send), address: &str) -> Result<Option<Vec<u8>>> {
     let unreachable = |e: std::io::Error| DataError::Unreachable {
         address: address.to_string(),
         detail: e.to_string(),

@@ -7,13 +7,32 @@ rust-version.workspace = true
 license = "Apache-2.0"
 repository.workspace = true
 publish.workspace = true
+[features]
+default = ["encryption"]
+
+# XChaCha20-Poly1305 for data at rest.
+#
+# A feature, and on by default, so that Scribe's WebAssembly core can turn it
+# off. That core is the *protocol* core -- it encodes and decodes frames -- and
+# it never seals anything, but it depends on this crate and so inherited the
+# AEAD. Two consequences, one fatal:
+#
+# * `chacha20poly1305 -> aead -> crypto-common -> rand_core 0.6 -> getrandom
+#   0.2`, and `getrandom` 0.2 refuses to compile for `wasm32-unknown-unknown`
+#   without a feature nobody had set. `make wasm` simply stopped working, and
+#   no CI job ran it, so nothing said so.
+# * The module ships into every user's app runtime. The Makefile's `wasm`
+#   target says it: "this module ships to the caller's app runtime, so it is a
+#   number every user downloads." An encryption implementation it never calls
+#   makes that number bigger for nothing.
+encryption = ["dep:chacha20poly1305", "dep:getrandom"]
+
 [dependencies]
 blake3.workspace = true
-# XChaCha20-Poly1305 for data at rest. Here rather than in `theta-storage`
-# because the Safety Layer's audit log needs the same sealing and has no reason
-# to depend on the storage engine.
-chacha20poly1305 = "0.10"
-getrandom.workspace = true
+# Here rather than in `theta-storage` because the Safety Layer's audit log needs
+# the same sealing and has no reason to depend on the storage engine.
+chacha20poly1305 = { version = "0.10", optional = true }
+getrandom = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

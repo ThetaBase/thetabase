@@ -171,8 +171,13 @@ fn no_quickstart_command_passes_an_argument_the_cli_does_not_accept() {
     let body = CLI
         .split("enum Command {")
         .nth(1)
-        .and_then(|rest| rest.split("
-}").next())
+        .and_then(|rest| {
+            rest.split(
+                "
+}",
+            )
+            .next()
+        })
         .expect("main.rs declares a Command enum");
 
     for line in README.lines() {
@@ -185,7 +190,10 @@ fn no_quickstart_command_passes_an_argument_the_cli_does_not_accept() {
         let Some(subcommand) = words.next() else {
             continue;
         };
-        if !subcommand.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+        if !subcommand
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c == '-')
+        {
             continue;
         }
 
@@ -208,11 +216,18 @@ fn no_quickstart_command_passes_an_argument_the_cli_does_not_accept() {
             .collect();
 
         let Some(declaration) = body
-            .split(&format!("
-    {variant} {{"))
+            .split(&format!(
+                "
+    {variant} {{"
+            ))
             .nth(1)
-            .and_then(|rest| rest.split("
-    },").next())
+            .and_then(|rest| {
+                rest.split(
+                    "
+    },",
+                )
+                .next()
+            })
         else {
             // Either a subcommand group (`Plan`, `Branch`, `Schema`) or one
             // with no block. Those take positionals through their own enums and
@@ -233,8 +248,10 @@ fn no_quickstart_command_passes_an_argument_the_cli_does_not_accept() {
                         .split(field)
                         .next()
                         .unwrap_or("")
-                        .rsplit("
-")
+                        .rsplit(
+                            "
+",
+                        )
                         .take(3)
                         .any(|prev| prev.contains("#[arg(long"))
             });

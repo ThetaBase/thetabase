@@ -572,8 +572,9 @@ async fn login(
     let config = match provider {
         // Named: honour it, and say what is on offer when it is not there.
         Some(name) => {
-            let kind = ProviderKind::parse(name)
-                .ok_or_else(|| format!("unknown provider `{name}` — this deployment offers {offered}"))?;
+            let kind = ProviderKind::parse(name).ok_or_else(|| {
+                format!("unknown provider `{name}` — this deployment offers {offered}")
+            })?;
             configured
                 .into_iter()
                 .find(|c| c.kind == kind)

@@ -7,6 +7,11 @@
 pub mod address;
 pub mod branch;
 pub mod crdt;
+// The AEAD is optional so Scribe's WebAssembly core can drop it: that core
+// encodes and decodes frames and never seals anything, and the sealing chain
+// ends at a `getrandom` that will not build for wasm32 at all. See the
+// `encryption` feature in Cargo.toml.
+#[cfg(feature = "encryption")]
 pub mod encryption;
 pub mod error;
 pub mod hash;
@@ -62,4 +67,5 @@ pub use index::{encoded_range, IndexBound};
 pub use log::{AgentProvenance, Author, CommitId, CrdtOp, LogEntry, OpType};
 pub use value::{Value, ValueType};
 
+#[cfg(feature = "encryption")]
 pub use encryption::DataKey;

@@ -117,8 +117,7 @@ struct Pki {
 
 impl Pki {
     fn generate() -> Self {
-        let mut ca_params =
-            rcgen::CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("ca params");
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         ca_params
             .distinguished_name
@@ -448,11 +447,7 @@ async fn the_override_can_force_plaintext() {
         let _ = DataClient::connect(&addr.to_string(), "tok_forced").await;
     }
 
-    let hello = expect_frame(
-        &mut rx,
-        "`THETA_TLS=0` must produce a plaintext connection",
-    )
-    .await;
+    let hello = expect_frame(&mut rx, "`THETA_TLS=0` must produce a plaintext connection").await;
     assert!(String::from_utf8_lossy(&hello).contains("tok_forced"));
 }
 
@@ -468,7 +463,10 @@ async fn a_trust_file_that_is_wrong_is_refused_rather_than_ignored() {
     std::fs::write(&empty, b"").expect("write");
 
     for (label, path) in [
-        ("a path that does not exist", "/nonexistent/ca.pem".to_string()),
+        (
+            "a path that does not exist",
+            "/nonexistent/ca.pem".to_string(),
+        ),
         ("a file with no certificates", empty.display().to_string()),
     ] {
         let outcome = {

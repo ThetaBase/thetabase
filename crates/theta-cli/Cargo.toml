@@ -37,7 +37,17 @@ tokio.workspace = true
 keyring-core = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = "1"
+# `keychain` explicitly. The crate refuses to compile on macOS without one of
+# `keychain` or `protected` chosen -- `compile_error!`, not a silent fallback --
+# and nothing on this machine or in CI's Linux job notices, because neither
+# builds for Apple. The first Apple build was the release workflow, on a tag,
+# after the repository was public.
+#
+# `keychain` rather than `protected`: `protected` is the data-protection
+# keychain, which needs an app group and a provisioning profile. A CLI has
+# neither, and the file-based keychain is what `security(1)` and every other
+# command-line tool on macOS already use.
+apple-native-keyring-store = { version = "1", default-features = false, features = ["keychain"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "1"

@@ -100,6 +100,14 @@ final class TCPSocket: FramedSocket {
             _ = WSAStartup(0x0202, &wsa)
             handle = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP.rawValue)
             guard handle != INVALID_SOCKET else { throw ProtocolError("could not open a socket") }
+        #elseif canImport(Darwin)
+            // `SOCK_STREAM` is a plain `Int32` here. On Linux it is
+            // `__socket_type`, which is why the arm below has to unwrap a
+            // `rawValue` that does not exist on Darwin -- and why this file did
+            // not compile for macOS or iOS at all, on a package that declares
+            // both.
+            handle = socket(AF_INET, SOCK_STREAM, 0)
+            guard handle >= 0 else { throw ProtocolError("could not open a socket") }
         #else
             handle = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
             guard handle >= 0 else { throw ProtocolError("could not open a socket") }
@@ -138,10 +146,19 @@ final class TCPSocket: FramedSocket {
         return (parts[3] << 24) | (parts[2] << 16) | (parts[1] << 8) | parts[0]
     }
 
+    /// The C `send`, not this class's.
+    ///
+    /// Module-qualified in every arm because the method below is also called
+    /// `send`: an unqualified call would recurse into it. That is necessary and
+    /// was not the bug -- naming `Glibc` in the non-Windows arm was, since the
+    /// module is `Darwin` on Apple platforms and this file claims to support
+    /// them.
     private func send(_ pointer: UnsafeRawPointer, _ count: Int) -> Int {
         #if canImport(WinSDK)
             return Int(
                 WinSDK.send(handle, pointer.assumingMemoryBound(to: CChar.self), Int32(count), 0))
+        #elseif canImport(Darwin)
+            return Darwin.send(handle, pointer, count, 0)
         #else
             return Glibc.send(handle, pointer, count, 0)
         #endif
@@ -151,6 +168,8 @@ final class TCPSocket: FramedSocket {
         #if canImport(WinSDK)
             return Int(
                 WinSDK.recv(handle, pointer.assumingMemoryBound(to: CChar.self), Int32(count), 0))
+        #elseif canImport(Darwin)
+            return Darwin.recv(handle, pointer, count, 0)
         #else
             return Glibc.recv(handle, pointer, count, 0)
         #endif
@@ -185,6 +204,8 @@ final class TCPSocket: FramedSocket {
     func close() {
         #if canImport(WinSDK)
             closesocket(handle)
+        #elseif canImport(Darwin)
+            _ = Darwin.close(handle)
         #else
             _ = Glibc.close(handle)
         #endif

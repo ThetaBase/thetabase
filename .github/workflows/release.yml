@@ -34,14 +34,28 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
+            build: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
+            build: x86_64-apple-darwin
             os: macos-latest
+          # `target` names the archive; `build` is what cargo is asked for.
+          #
+          # They differ on Linux on purpose. The released binaries are static
+          # musl, because the gnu builds on `ubuntu-latest` carried a
+          # GLIBC_2.39 requirement and refused to start on Debian 12, Ubuntu
+          # 22.04, or Amazon Linux 2023 -- and could not run on Alpine at all.
+          # The archive keeps the `-gnu` name because install.sh already
+          # constructs that URL, and the linkage underneath is not something a
+          # person downloading it has to care about.
           - target: x86_64-unknown-linux-gnu
+            build: x86_64-unknown-linux-musl
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
+            build: aarch64-unknown-linux-musl
             os: ubuntu-latest
           - target: x86_64-pc-windows-msvc
+            build: x86_64-pc-windows-msvc
             os: windows-latest
 
     steps:
@@ -49,7 +63,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.build }}
 
       # `theta-proto` generates from a Cap'n Proto schema at build time.
       - name: Install capnp (Linux)
@@ -64,12 +78,23 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install capnproto --no-progress
 
-      # Cross-linking aarch64 from an x86 runner needs the GNU cross toolchain.
-      - name: Cross-compilation toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      # musl needs its own linker, and the aarch64 one is a cross toolchain.
+      #
+      # `ring` and `blake3` both compile C, so a C compiler for the target is
+      # required and not only a linker -- which is why `musl-tools` is here and
+      # not just the target added to rustup.
+      - name: musl toolchain
+        if: endsWith(matrix.build, '-linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools musl-dev
+
+      - name: aarch64 musl cross toolchain
+        if: matrix.build == 'aarch64-unknown-linux-musl'
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       # `--locked` refuses to update Cargo.lock. A released binary built from a
       # dependency tree nobody tested is a binary nobody tested.
@@ -91,8 +116,8 @@ jobs:
           set -euo pipefail
           name="theta-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/theta" "dist/$name/"
-          cp "target/${{ matrix.target }}/release/theta-mcp" "dist/$name/"
+          cp "target/${{ matrix.build }}/release/theta" "dist/$name/"
+          cp "target/${{ matrix.build }}/release/theta-mcp" "dist/$name/"
           cp README.md "dist/$name/" 2>/dev/null || true
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           # Checksums beside the artefact. A download nobody can verify is a
@@ -112,8 +137,8 @@ jobs:
         run: |
           $name = "theta-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/theta.exe" "dist/$name/"
-          Copy-Item "target/${{ matrix.target }}/release/theta-mcp.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.build }}/release/theta.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.build }}/release/theta-mcp.exe" "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
           # Same format as the unix side: hash, two spaces, bare filename.
           # `Get-FileHash` alone writes the hash and nothing else, which no

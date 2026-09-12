@@ -11,5 +11,5 @@ require_relative "thetabase/query"
 require_relative "thetabase/scribe"
 
 module ThetaBase
-  VERSION = "0.0.2"
+  VERSION = "0.0.3"
 end

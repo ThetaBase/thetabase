@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 rust-version = "1.90"
 # No licence has been chosen yet, and this field must not pretend otherwise.

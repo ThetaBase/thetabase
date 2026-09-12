@@ -4147,7 +4147,7 @@ dependencies = [
 
 [[package]]
 name = "theta-archive"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
@@ -4165,7 +4165,7 @@ dependencies = [
 
 [[package]]
 name = "theta-cli"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -4197,7 +4197,7 @@ dependencies = [
 
 [[package]]
 name = "theta-codegen"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "capnp",
@@ -4206,7 +4206,7 @@ dependencies = [
 
 [[package]]
 name = "theta-core"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -4219,7 +4219,7 @@ dependencies = [
 
 [[package]]
 name = "theta-eject"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4234,7 +4234,7 @@ dependencies = [
 
 [[package]]
 name = "theta-embed"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4248,7 +4248,7 @@ dependencies = [
 
 [[package]]
 name = "theta-identity"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -4261,7 +4261,7 @@ dependencies = [
 
 [[package]]
 name = "theta-mcp"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -4283,7 +4283,7 @@ dependencies = [
 
 [[package]]
 name = "theta-proto"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "capnp",
  "capnpc",
@@ -4295,7 +4295,7 @@ dependencies = [
 
 [[package]]
 name = "theta-query"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -4310,7 +4310,7 @@ dependencies = [
 
 [[package]]
 name = "theta-safety"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -4326,7 +4326,7 @@ dependencies = [
 
 [[package]]
 name = "theta-scribe"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4343,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "theta-scribe-wasm"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4354,7 +4354,7 @@ dependencies = [
 
 [[package]]
 name = "theta-storage"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "chacha20poly1305",
  "crc32fast",
@@ -4372,7 +4372,7 @@ dependencies = [
 
 [[package]]
 name = "thetabase"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4386,7 +4386,7 @@ dependencies = [
 
 [[package]]
 name = "thetad"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "base64",

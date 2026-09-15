@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 const CLI: &str = include_str!("../src/main.rs");
 const README: &str = include_str!("../../../README.md");
 const INSTALL: &str = include_str!("../../../install.sh");
+const INSTALL_PS1: &str = include_str!("../../../install.ps1");
 
 /// Subcommand names, as clap derives them: a bare variant in the `Command`
 /// enum becomes its kebab-case name.
@@ -259,6 +260,97 @@ fn no_quickstart_command_passes_an_argument_the_cli_does_not_accept() {
         assert!(
             has_positional,
             "the README runs `theta {subcommand} {next}`, and `{variant}`              declares no positional argument -- so the CLI answers \"unexpected              argument\" to a command on its own quickstart"
+        );
+    }
+}
+
+/// Windows has an install path that ends in a working command.
+///
+/// It did not. `install.sh` refuses on Windows and says "download the .zip from
+/// Releases", and the README said the same — neither of which says where to put
+/// the extracted binaries or how to get them onto PATH. Following the
+/// documentation exactly left you with:
+///
+/// ```text
+/// theta : The term 'theta' is not recognized as the name of a cmdlet...
+/// ```
+///
+/// Which is what happened, on the first attempt to actually use the thing.
+#[test]
+fn windows_has_an_installer_and_the_readme_points_at_it() {
+    assert!(
+        README.contains("install.ps1"),
+        "the README does not mention the Windows installer, so a Windows user          still ends at an unzipped folder that is not on their PATH"
+    );
+
+    // The installer has to do the three things the shell one does, plus the one
+    // it deliberately does not: put the directory on PATH.
+    for (needle, why) in [
+        (
+            "SetEnvironmentVariable('PATH'",
+            "nothing adds the install directory to PATH, which is the entire              reason this script exists",
+        ),
+        (
+            "'User'",
+            "the PATH edit is not scoped to the user, so it either needs              administrator or changes the machine for everybody on it",
+        ),
+        (
+            "Get-FileHash",
+            "the download is not checksummed",
+        ),
+        (
+            "theta-mcp.exe",
+            "only the CLI is installed; the MCP server is how an agent reaches              ThetaBase and ships in the same archive",
+        ),
+    ] {
+        assert!(
+            INSTALL_PS1.contains(needle),
+            "install.ps1 is missing `{needle}`: {why}"
+        );
+    }
+
+    // And it must never reach for the machine-wide environment. That needs an
+    // administrator, and a script piped from the internet into a shell has
+    // asked for enough trust already.
+    assert!(
+        !INSTALL_PS1.contains("'Machine'")
+            || INSTALL_PS1.contains("GetEnvironmentVariable('PATH', 'Machine')"),
+        "install.ps1 writes to the machine environment"
+    );
+}
+
+/// The website serves both installers.
+///
+/// `install.ps1` living in the repository is not the same as
+/// `irm https://thetabase.co/install.ps1` working: the web image copies
+/// `install.sh` in explicitly rather than sweeping the directory, so a second
+/// script has to be named there too or the README points at a 404.
+#[test]
+fn the_web_image_serves_every_installer_the_readme_names() {
+    // Read at runtime, not with `include_str!`. `deploy/Dockerfile.web` is our
+    // own infrastructure and the public export omits it -- and `include_str!`
+    // on a missing file is a *compile* error, so this test would not have
+    // failed in the published repository, it would have stopped the whole
+    // `theta-cli` test target from building.
+    //
+    // That is the fourth time this session a test has named something the
+    // export removes, and the first where the consequence was a build failure
+    // rather than a test failure. Caught before pushing by asking the export
+    // script, which is the check that should have come first the other three
+    // times.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/Dockerfile.web");
+    let Ok(dockerfile) = std::fs::read_to_string(&path) else {
+        eprintln!(
+            "skipping: {} is not in this workspace. The deployment files are              ours and absent from the public export.",
+            path.display()
+        );
+        return;
+    };
+
+    for script in ["install.sh", "install.ps1"] {
+        assert!(
+            dockerfile.contains(&format!("COPY {script} /srv/{script}")),
+            "the web image does not serve `{script}`, so the README's link to              it is a 404"
         );
     }
 }

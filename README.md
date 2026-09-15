@@ -68,8 +68,23 @@ docs/
 curl -fsSL https://thetabase.co/install.sh | sh
 ```
 
-Windows: download the `.zip` from
-[Releases](https://github.com/ThetaBase/thetabase/releases).
+Windows, in PowerShell:
+
+```powershell
+irm https://thetabase.co/install.ps1 | iex
+```
+
+Both install to a user directory, verify the published checksum, and need no
+administrator. Neither touches a system location. The PowerShell one adds
+itself to your *user* PATH, because the Windows equivalent of "add this line to
+your shell profile" is a registry value, and telling somebody to edit the
+registry by hand is worse advice than doing it for them.
+
+If you would rather not pipe a script into a shell, the `.zip` and `.tar.gz`
+archives are on the
+[Releases](https://github.com/ThetaBase/thetabase/releases) page with a
+`.sha256` beside each one. Extract it and put the two binaries somewhere on
+your PATH.
 
 Then, in about ninety seconds, watch the Safety Layer stop something:
 
